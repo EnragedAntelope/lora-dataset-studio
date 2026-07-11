@@ -1,0 +1,18 @@
+{
+  "1": {"class_type": "LoadImage", "inputs": {"image": "__SOURCE__"}},
+  "2": {"class_type": "FluxKontextImageScale", "inputs": {"image": ["1", 0]}},
+  "3": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_edit_2511_int8_convrot.safetensors", "weight_dtype": "default"}},
+  "4": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default"}},
+  "5": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
+  "6": {"class_type": "ModelSamplingAuraFlow", "inputs": {"shift": 3.1, "model": ["3", 0]}},
+  "7": {"class_type": "CFGNorm", "inputs": {"strength": 1, "pre_cfg": false, "model": ["6", 0]}},
+  "8": {"class_type": "LoraLoaderModelOnly", "inputs": {"lora_name": "qwen\\Qwen-Image-Edit-2511-Multiple-Angles-LoRA.safetensors", "strength_model": 1.0, "model": ["7", 0]}},
+  "9": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"prompt": "__PROMPT__", "clip": ["4", 0], "vae": ["5", 0], "image1": ["2", 0]}},
+  "10": {"class_type": "TextEncodeQwenImageEditPlus", "inputs": {"prompt": "", "clip": ["4", 0], "vae": ["5", 0], "image1": ["2", 0]}},
+  "11": {"class_type": "FluxKontextMultiReferenceLatentMethod", "inputs": {"reference_latents_method": "index_timestep_zero", "conditioning": ["9", 0]}},
+  "12": {"class_type": "FluxKontextMultiReferenceLatentMethod", "inputs": {"reference_latents_method": "index_timestep_zero", "conditioning": ["10", 0]}},
+  "13": {"class_type": "VAEEncode", "inputs": {"pixels": ["2", 0], "vae": ["5", 0]}},
+  "14": {"class_type": "KSampler", "inputs": {"seed": 0, "steps": 40, "cfg": 4, "sampler_name": "euler", "scheduler": "simple", "denoise": 1, "model": ["8", 0], "positive": ["11", 0], "negative": ["12", 0], "latent_image": ["13", 0]}},
+  "15": {"class_type": "VAEDecode", "inputs": {"samples": ["14", 0], "vae": ["5", 0]}},
+  "16": {"class_type": "SaveImage", "inputs": {"filename_prefix": "LDS", "images": ["15", 0]}}
+}

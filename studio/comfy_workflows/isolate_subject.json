@@ -1,0 +1,10 @@
+{
+  "1": {"class_type": "LoadImage", "inputs": {"image": "__SOURCE__"}},
+  "120": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "sam3.1_multiplex_fp16.safetensors"}},
+  "121": {"class_type": "CLIPTextEncode", "inputs": {"text": "character", "clip": ["120", 1]}},
+  "119": {"class_type": "SAM3_Detect", "inputs": {"threshold": 0.5, "refine_iterations": 2, "individual_masks": false, "model": ["120", 0], "image": ["1", 0], "conditioning": ["121", 0]}},
+  "118": {"class_type": "InvertMask", "inputs": {"mask": ["119", 0]}},
+  "115": {"class_type": "MaskPreview+", "inputs": {"mask": ["118", 0]}},
+  "116": {"class_type": "ImageCompositeMasked", "inputs": {"x": 0, "y": 0, "resize_source": false, "destination": ["115", 0], "source": ["1", 0], "mask": ["119", 0]}},
+  "3": {"class_type": "SaveImage", "inputs": {"filename_prefix": "LDS_isolated", "images": ["116", 0]}}
+}

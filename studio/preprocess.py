@@ -1,0 +1,136 @@
+"""Preprocess: analyze source images, optionally restore and isolate, resize.
+
+Fully standalone — point it at any image(s). Restoration backends:
+- "comfyui" — model-based DeJPG + photo upscale through ComfyUI (best quality)
+- "basic"   — plain Lanczos resampling, no external dependency
+- "auto"    — comfyui when reachable and restoration is warranted, else basic
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+from studio.config import settings
+from studio.isolate import isolate_subject
+
+BLUR_THRESHOLD = 120.0  # Laplacian variance below this = soft/degraded image
+
+
+@dataclass
+class PreprocessReport:
+    source: Path
+    output: Path
+    original_size: tuple[int, int]
+    final_size: tuple[int, int]
+    restored: bool
+    reason: str
+    isolated: bool = False
+
+
+def _laplacian_variance(img: Image.Image) -> float:
+    gray = np.asarray(img.convert("L"), dtype=np.float64)
+    lap = (
+        -4 * gray
+        + np.roll(gray, 1, 0)
+        + np.roll(gray, -1, 0)
+        + np.roll(gray, 1, 1)
+        + np.roll(gray, -1, 1)
+    )
+    return float(lap.var())
+
+
+def _needs_restoration(img: Image.Image, path: Path, target: int) -> str:
+    """Return a human-readable reason, or '' if the image is fine as-is."""
+    long_side = max(img.size)
+    if long_side < target:
+        return f"long side {long_side}px < target {target}px"
+    if path.suffix.lower() in (".jpg", ".jpeg", ".webp"):
+        return "lossy source format"
+    if _laplacian_variance(img) < BLUR_THRESHOLD:
+        return "low sharpness (blur/grain)"
+    return ""
+
+
+def _resize_to_target(img: Image.Image, target: int) -> Image.Image:
+    long_side = max(img.size)
+    if long_side == target:
+        return img
+    scale = target / long_side
+    new_size = (round(img.width * scale), round(img.height * scale))
+    return img.resize(new_size, Image.LANCZOS)
+
+
+def _restore_comfyui(source: Path, out_path: Path) -> Path:
+    from studio import comfy_api
+
+    uploaded = comfy_api.upload_image(source)
+    graph = comfy_api.load_template("restore_upscale")
+    graph["1"]["inputs"]["image"] = uploaded
+    refs = comfy_api.run_prompt(graph, timeout=420)
+    return comfy_api.fetch_image(refs[0], out_path)
+
+
+def preprocess(
+    source: Path,
+    work_dir: Path,
+    target: int | None = None,
+    force_restore: bool | None = None,
+    isolate: bool = True,
+    subject_prompt: str = "character",
+    exclude_prompt: str = "",
+    restore_backend: str = "",
+    isolation_backend: str = "",
+) -> PreprocessReport:
+    """Copy + clean one source image into `work_dir` at target resolution.
+
+    force_restore: True = always restore, False = never, None = auto-decide.
+    isolate: cut out the subject so backgrounds and props don't leak into
+    generations or the dataset.
+    """
+    target = target or settings.target_long_side
+    restore_backend = restore_backend or settings.restore_backend
+    work_dir.mkdir(parents=True, exist_ok=True)
+    img = Image.open(source).convert("RGB")
+    original_size = img.size
+
+    reason = _needs_restoration(img, source, target)
+    restore = reason != "" if force_restore is None else force_restore
+    if force_restore:
+        reason = reason or "forced by user"
+
+    out_path = work_dir / f"{source.stem}_prepped.png"
+    stage_path = source
+    if restore:
+        if restore_backend == "auto":
+            from studio import comfy_api
+
+            restore_backend = "comfyui" if comfy_api.is_up() else "basic"
+        if restore_backend == "comfyui":
+            _restore_comfyui(stage_path, out_path)
+            stage_path = out_path
+        else:
+            # Basic path: Lanczos handles resolution; sharpness/compression
+            # damage stays (note it so the user knows what they're getting).
+            reason += " (basic Lanczos only — ComfyUI restore not used)"
+
+    if isolate:
+        isolate_subject(stage_path, out_path, subject_prompt, exclude_prompt,
+                        backend=isolation_backend)
+        stage_path = out_path
+
+    img = Image.open(stage_path).convert("RGB")
+    img = _resize_to_target(img, target)
+    img.save(out_path, "PNG")
+    return PreprocessReport(
+        source=source,
+        output=out_path,
+        original_size=original_size,
+        final_size=img.size,
+        restored=restore,
+        reason=reason or "clean source, resize only",
+        isolated=isolate,
+    )

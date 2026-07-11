@@ -1,0 +1,8 @@
+{
+  "1": {"class_type": "LoadImage", "inputs": {"image": "__SOURCE__"}},
+  "2": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": "1xDeJPG_OmniSR.pth"}},
+  "3": {"class_type": "ImageUpscaleWithModel", "inputs": {"image": ["1", 0], "upscale_model": ["2", 0]}},
+  "4": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": "4xNomosWebPhoto_RealPLKSR.safetensors"}},
+  "5": {"class_type": "ImageUpscaleWithModel", "inputs": {"image": ["3", 0], "upscale_model": ["4", 0]}},
+  "6": {"class_type": "SaveImage", "inputs": {"filename_prefix": "LDS_restored", "images": ["5", 0]}}
+}
