@@ -67,10 +67,12 @@ def _df_to_shots(df: pd.DataFrame) -> list[Shot]:
         v = row[k] if k in row else ""
         return "" if pd.isna(v) else str(v)
 
-    cols = ("id", "kind", "local_prompt", "cloud_prompt", "chain_from")
+    cols = (
+        "id", "kind", "local_prompt", "cloud_prompt",
+        "chain_from", "emotion", "setting",
+    )
     return [Shot(**{k: val(row, k) for k in cols})
             for _, row in df.iterrows() if val(row, "id").strip()]
-
 
 def _gen_gallery(results: list[pipeline.GenResult]):
     ok = [r for r in results if r.path and r.path.exists()]
@@ -264,24 +266,29 @@ def refresh_plan(name: str) -> pd.DataFrame:
 def estimate_cost(engine: str, cloud_model: str, df: pd.DataFrame) -> str:
     n = len(df)
     if engine == "gemini":
+        from studio.config import CLOUD_IMAGE_PRICES, load_cloud_model_cache
+
         price = CLOUD_IMAGE_PRICES.get(cloud_model)
+        cached = load_cloud_model_cache() or []
+        for m in cached:
+            if m.get("model_id") == cloud_model and m.get("price") is not None:
+                price = m["price"]
+                break
         if price is None:
             return f"**Cost:** {n} images on `{cloud_model}` (price unknown — billed to your API key)"
         return (f"**Cost:** ~${n * price:.2f} for {n} images on `{cloud_model}` "
                 f"(estimate at build time — billed to your own Google API key)")
     return f"**Cost:** {n} images, $0 (local generation)"
 
-
-def refresh_cloud_models():
+def refresh_cloud_models(force: bool = False):
     from studio.engines.gemini import list_image_models
 
     try:
-        models = list_image_models()
+        models = list_image_models(force_refresh=force)
     except Exception as e:
         raise gr.Error(f"Could not list models: {e}")
-    return gr.Dropdown(choices=[(f"{m}  ({p})", m) for m, p in models],
-                       value=models[0][0] if models else settings.gemini_image_model)
-
+    return gr.Dropdown(choices=models,
+                       value=models[0][1] if models else settings.gemini_image_model)
 
 # ---------- layout ----------
 
@@ -344,6 +351,7 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                                               value=settings.gemini_image_model,
                                               label="Cloud image model")
                     refresh_models = gr.Button("🔄 Refresh model list from API")
+                    force_refresh_models = gr.Button("🔄 Force refresh model list now")
                     cost = gr.Markdown()
                     gen_isolate = gr.Checkbox(value=False,
                                               label="Isolate generated angle shots (white background)")
@@ -412,6 +420,11 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
 
     refresh.click(refresh_plan, [gen_name], [plan])
     refresh_models.click(refresh_cloud_models, [], [cloud_model])
+
+    def _force_refresh():
+        return refresh_cloud_models(force=True)
+
+    force_refresh_models.click(_force_refresh, [], [cloud_model])
     engine.change(estimate_cost, [engine, cloud_model, plan], [cost])
     cloud_model.change(estimate_cost, [engine, cloud_model, plan], [cost])
     plan.change(estimate_cost, [engine, cloud_model, plan], [cost])

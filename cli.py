@@ -14,7 +14,7 @@ from pathlib import Path
 import typer
 
 from studio import pipeline
-from studio.config import CAPTIONERS_BY_KEY, CLOUD_IMAGE_PRICES, list_images, settings
+from studio.config import CAPTIONERS_BY_KEY, list_images, settings
 from studio.shotplan import default_plan
 
 app = typer.Typer(add_completion=False, help=__doc__)
@@ -72,7 +72,15 @@ def generate(
     if max_shots:
         shots = shots[:max_shots]
     if engine == "gemini":
-        price = CLOUD_IMAGE_PRICES.get(cloud_model or settings.gemini_image_model)
+        from studio.config import CLOUD_IMAGE_PRICES, load_cloud_model_cache
+
+        model_id = cloud_model or settings.gemini_image_model
+        price = CLOUD_IMAGE_PRICES.get(model_id)
+        cached = load_cloud_model_cache() or []
+        for m in cached:
+            if m.get("model_id") == model_id and m.get("price") is not None:
+                price = m["price"]
+                break
         if price:
             typer.echo(f"Cloud engine: ~${len(shots) * price:.2f} estimated for "
                        f"{len(shots)} images (billed to your Google API key).")
@@ -163,7 +171,15 @@ def build(
     if max_shots:
         shots = shots[:max_shots]
     if engine == "gemini":
-        price = CLOUD_IMAGE_PRICES.get(cloud_model or settings.gemini_image_model)
+        from studio.config import CLOUD_IMAGE_PRICES, load_cloud_model_cache
+
+        model_id = cloud_model or settings.gemini_image_model
+        price = CLOUD_IMAGE_PRICES.get(model_id)
+        cached = load_cloud_model_cache() or []
+        for m in cached:
+            if m.get("model_id") == model_id and m.get("price") is not None:
+                price = m["price"]
+                break
         if price:
             typer.echo(f"Cloud engine: ~${len(shots) * price:.2f} estimated for "
                        f"{len(shots)} images (billed to your Google API key).")
