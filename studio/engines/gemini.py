@@ -6,33 +6,106 @@ estimates captured at build time — always check current Google pricing.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
-from studio.config import settings
+from studio.config import (
+    CLOUD_IMAGE_PRICES,
+    MODEL_CACHE_FILE,
+    load_cloud_model_cache,
+    save_cloud_model_cache,
+    settings,
+)
 from studio.engines.base import GenerationError
 from studio.shotplan import Shot
 
 MAX_REFERENCE_IMAGES = 14
 
+# Re-exported so tests can monkeypatch a single module-level path.
+MODEL_CACHE_FILE = MODEL_CACHE_FILE
 
-def list_image_models() -> list[tuple[str, str]]:
-    """Live-pull image-capable Gemini models: [(model_id, price_label), ...]."""
-    from google import genai
 
-    from studio.config import CLOUD_IMAGE_PRICES
+def _load_model_cache() -> list[dict] | None:
+    """Thin wrapper around the config cache, kept here for testability."""
+    return load_cloud_model_cache()
+
+
+def _save_model_cache(models: list[dict]) -> None:
+    """Thin wrapper around the config cache, kept here for testability."""
+    save_cloud_model_cache(models)
+
+
+def _model_label(name: str, price: float | None) -> str:
+    if price is None:
+        return f"{name}  (price unknown)"
+    return f"{name}  (${price:.3f}/img est.)"
+
+
+def _fallback_models() -> list[tuple[str, str]]:
+    """Static fallback when live listing is impossible."""
+    return [(_model_label(m, p), m) for m, p in CLOUD_IMAGE_PRICES.items()]
+
+
+def list_image_models(force_refresh: bool = False) -> list[tuple[str, str]]:
+    """Return image-capable Gemini models as [(display_label, model_id), ...].
+
+    Uses a 24-hour local cache so the UI dropdown loads instantly. If the
+    cache is stale/missing, live-pull from the API and persist. Falls back to
+    the static price table if the API is unreachable or no key is configured.
+    """
+    if not force_refresh:
+        cached = _load_model_cache()
+        if cached:
+            return [
+                (_model_label(m["model_id"], m.get("price")), m["model_id"])
+                for m in cached
+            ]
 
     key = settings.resolved_gemini_key()
     if not key:
-        return [(m, f"${p:.3f}/img") for m, p in CLOUD_IMAGE_PRICES.items()]
-    client = genai.Client(api_key=key)
-    found = []
-    for m in client.models.list():
-        name = m.name.removeprefix("models/")
-        if "image" not in name or "imagen" in name:  # imagen = t2i only, no reference edit
-            continue
-        price = CLOUD_IMAGE_PRICES.get(name)
-        found.append((name, f"${price:.3f}/img" if price else "price unknown"))
-    return found or [(m, f"${p:.3f}/img") for m, p in CLOUD_IMAGE_PRICES.items()]
+        return _fallback_models()
+
+    from google import genai
+
+    try:
+        client = genai.Client(api_key=key)
+        found: list[dict] = []
+        for m in client.models.list():
+            name = m.name.removeprefix("models/")
+            if "image" not in name or "imagen" in name:  # imagen = t2i only, no reference edit
+                continue
+            # Skip deprecated / shutdown models when the API lists them.
+            if any(tag in name for tag in ("-shut-down", "deprecated", "-experimental")):
+                continue
+            price = CLOUD_IMAGE_PRICES.get(name)
+            found.append(
+                {
+                    "model_id": name,
+                    "display_name": getattr(m, "display_name", name),
+                    "price": price,
+                    "cached_at": datetime.now(tz=timezone.utc).isoformat(),
+                }
+            )
+        if found:
+            _save_model_cache(found)
+            return [
+                (_model_label(f["model_id"], f["price"]), f["model_id"])
+                for f in found
+            ]
+            _save_model_cache(found)
+            return [(_model_label(f["model_id"], f["price"]), f["model_id"]) for f in found]
+    except Exception:
+        # Live pull failed; try stale cache as a last resort before falling
+        # back to the static dict.
+        stale = _load_model_cache()
+        if stale:
+            return [
+                (_model_label(m["model_id"], m.get("price")), m["model_id"])
+                for m in stale
+            ]
+            return [(_model_label(m["model_id"], m.get("price")), m["model_id"]) for m in stale]
+
+    return _fallback_models()
 
 
 class GeminiEngine:

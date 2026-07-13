@@ -6,6 +6,9 @@ Everything here is overridable via environment variables prefixed LDS_
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
+
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -109,7 +112,18 @@ CAPTIONERS: list[CaptionerSpec] = [
         api_key_env="GROQ_API_KEY",
         min_interval_s=2.5,
         nsfw_capable=False,
-        cost_note="free tier (rate-limited)",
+        cost_note="free tier (rate-limited; 30K TPM)",
+    ),
+    CaptionerSpec(
+        key="groq-qwen3.6",
+        label="Cloud: Groq Qwen3.6 27B (free tier, SFW)",
+        backend="openai",
+        base_url="https://api.groq.com/openai/v1",
+        model="qwen/qwen3.6-27b",
+        api_key_env="GROQ_API_KEY",
+        min_interval_s=3.0,  # lower free-tier TPM (8K) than Scout
+        nsfw_capable=False,
+        cost_note="free tier (rate-limited; 8K TPM, lower throughput than Scout)",
     ),
     CaptionerSpec(
         key="lmstudio",
@@ -132,14 +146,49 @@ ENGINES = {
     "comfyui": "Local - ComfyUI Qwen Image Edit 2511 (free, private, uncensored)",
 }
 
-# Known Gemini image models -> USD per standard-resolution image.
+# Known Gemini image models -> USD per standard-resolution (1K) image.
 # ESTIMATES captured at build time — actual costs are billed by Google to the
 # user's own API key; the UI can live-pull the current model list.
 CLOUD_IMAGE_PRICES = {
-    "gemini-3-pro-image-preview": 0.134,
-    "gemini-3.1-flash-image-preview": 0.067,
-    "gemini-2.5-flash-image": 0.039,
+    "gemini-3-pro-image-preview": 0.134,  # Nano Banana Pro (1K-2K)
+    "gemini-3.1-flash-image-preview": 0.067,  # Nano Banana 2 (1K)
+    "gemini-2.5-flash-image": 0.039,  # Nano Banana (1K)
 }
+
+# Local cache for the live Gemini model list so the dropdown can be populated
+# without an API call on every UI load. 24-hour TTL; falls back to stale cache,
+# then to CLOUD_IMAGE_PRICES if the API is unreachable.
+CACHE_DIR = REPO_ROOT / ".cache"
+MODEL_CACHE_FILE = CACHE_DIR / "gemini_image_models.json"
+MODEL_CACHE_TTL_HOURS = 24
+
+
+def load_cloud_model_cache() -> list[dict] | None:
+    """Return cached model entries if the cache exists and is fresh."""
+    if not MODEL_CACHE_FILE.exists():
+        return None
+    try:
+        data = json.loads(MODEL_CACHE_FILE.read_text(encoding="utf-8"))
+        cached_at = datetime.fromisoformat(data["cached_at"])
+        age = datetime.now(tz=timezone.utc) - cached_at
+        if age > timedelta(hours=MODEL_CACHE_TTL_HOURS):
+            return None
+            return None
+        return data.get("models", [])
+    except Exception:
+        return None
+
+
+def save_cloud_model_cache(models: list[dict]) -> None:
+    """Persist the live model list with a timestamp."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    MODEL_CACHE_FILE.write_text(
+        json.dumps(
+            {"cached_at": datetime.now(tz=timezone.utc).isoformat(), "models": models},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
