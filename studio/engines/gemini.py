@@ -12,7 +12,9 @@ from pathlib import Path
 from studio.config import (
     CLOUD_IMAGE_PRICES,
     MODEL_CACHE_FILE,
+    load_caption_model_cache,
     load_cloud_model_cache,
+    save_caption_model_cache,
     save_cloud_model_cache,
     settings,
 )
@@ -92,8 +94,6 @@ def list_image_models(force_refresh: bool = False) -> list[tuple[str, str]]:
                 (_model_label(f["model_id"], f["price"]), f["model_id"])
                 for f in found
             ]
-            _save_model_cache(found)
-            return [(_model_label(f["model_id"], f["price"]), f["model_id"]) for f in found]
     except Exception:
         # Live pull failed; try stale cache as a last resort before falling
         # back to the static dict.
@@ -103,9 +103,72 @@ def list_image_models(force_refresh: bool = False) -> list[tuple[str, str]]:
                 (_model_label(m["model_id"], m.get("price")), m["model_id"])
                 for m in stale
             ]
-            return [(_model_label(m["model_id"], m.get("price")), m["model_id"]) for m in stale]
 
     return _fallback_models()
+
+
+# Gemini caption models the app falls back to when the API can't be listed.
+# All current Gemini text models accept image input; "-latest" aliases are
+# safest as a default because they don't 404 when a pinned version is retired.
+_CAPTION_FALLBACK = [
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+]
+
+
+def list_caption_models(force_refresh: bool = False) -> list[tuple[str, str]]:
+    """Return vision-capable Gemini caption models as [(label, model_id), ...].
+
+    Same 24-hour-cache + stale-fallback strategy as `list_image_models`, but
+    filtered to text/vision models that support `generateContent` (excludes
+    image-generation, embedding, TTS, and audio/live models).
+    """
+    def _labelled(ids: list[str]) -> list[tuple[str, str]]:
+        return [(m, m) for m in ids]
+
+    if not force_refresh:
+        cached = load_caption_model_cache()
+        if cached:
+            return _labelled([m["model_id"] for m in cached])
+
+    key = settings.resolved_gemini_key()
+    if not key:
+        return _labelled(_CAPTION_FALLBACK)
+
+    from google import genai
+
+    try:
+        client = genai.Client(api_key=key)
+        found: list[dict] = []
+        for m in client.models.list():
+            name = m.name.removeprefix("models/")
+            actions = getattr(m, "supported_actions", None) or []
+            if "generateContent" not in actions:
+                continue
+            # Keep chat/vision Gemini models; drop image-gen, embeddings, TTS,
+            # and audio/live variants that can't caption a still image.
+            if not name.startswith("gemini"):
+                continue
+            if any(t in name for t in ("image", "imagen", "embedding", "tts",
+                                       "audio", "live", "-omni")):
+                continue
+            found.append({"model_id": name,
+                          "display_name": getattr(m, "display_name", name)})
+        if found:
+            # Surface the rolling "-latest" aliases first so the safe default
+            # is at the top of the dropdown.
+            found.sort(key=lambda f: (0 if f["model_id"].endswith("latest") else 1,
+                                      f["model_id"]))
+            save_caption_model_cache(found)
+            return _labelled([f["model_id"] for f in found])
+    except Exception:
+        stale = load_caption_model_cache()
+        if stale:
+            return _labelled([m["model_id"] for m in stale])
+
+    return _labelled(_CAPTION_FALLBACK)
 
 
 class GeminiEngine:

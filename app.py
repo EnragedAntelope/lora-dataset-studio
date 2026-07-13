@@ -9,6 +9,9 @@ Run:  python app.py   then open http://127.0.0.1:7861
 
 from __future__ import annotations
 
+import os
+import re
+import string
 from datetime import datetime
 from pathlib import Path
 
@@ -16,8 +19,16 @@ import gradio as gr
 import pandas as pd
 
 from studio import pipeline
+from studio import user_config as _uc_boot
 from studio.captioner import SUBJECT_ALIASES, Captioner, caption_images, finalize_caption
-from studio.config import CAPTIONERS, CLOUD_IMAGE_PRICES, list_images, settings
+from studio.config import (
+    CAPTIONERS,
+    CAPTIONERS_BY_KEY,
+    CLOUD_IMAGE_PRICES,
+    list_images,
+    load_caption_model_cache,
+    settings,
+)
 from studio.shotplan import Shot, default_plan
 from studio.trainer_configs import TRAINER_MODELS, TRAINERS
 
@@ -29,6 +40,14 @@ ENGINE_CHOICES = [
 ]
 CLOUD_MODEL_CHOICES = [(f"{m}  (~${p:.3f}/img est.)", m) for m, p in CLOUD_IMAGE_PRICES.items()]
 CAPTIONER_CHOICES = [(c.label, c.key) for c in CAPTIONERS]
+
+# Gemini caption-model dropdown seed: use the local cache if present, else a
+# safe rolling-alias default. Live refresh happens on demand via the button
+# (kept off the startup path so the UI loads instantly and offline).
+_DEFAULT_CAPTION_MODEL = "gemini-flash-latest"
+_cached_caption_models = load_caption_model_cache() or []
+CAPTION_MODEL_CHOICES = [(m["model_id"], m["model_id"]) for m in _cached_caption_models] \
+    or [(_DEFAULT_CAPTION_MODEL, _DEFAULT_CAPTION_MODEL)]
 ISOLATION_CHOICES = [
     ("Built-in SAM3 (no ComfyUI needed; gated HF model)", "builtin"),
     ("ComfyUI SAM3 workflow", "comfyui"),
@@ -58,6 +77,42 @@ def _inputs(files: list[str] | None, folder: str) -> list[Path]:
             return images
         raise gr.Error(f"No images found in folder: {folder}")
     raise gr.Error("Upload image(s) or enter an input folder first.")
+
+
+# Characters Windows forbids in a path (excluding the drive-letter colon).
+_WIN_INVALID_PATH = re.compile(r'[<>"|?*]')
+
+
+def _validate_out_dir(path_str: str) -> Path:
+    """Validate a user-entered output folder, raising a friendly gr.Error for
+    paths the OS can't create — instead of a raw OSError traceback."""
+    raw = path_str.strip().strip('"')
+    if not raw:
+        raise gr.Error("Enter an output folder.")
+    # Ignore a leading drive-letter colon (C:\...) when scanning the rest for
+    # the colon / other characters Windows forbids inside a path.
+    tail = raw[2:] if len(raw) >= 2 and raw[1] == ":" else raw
+    if _WIN_INVALID_PATH.search(tail) or ":" in tail or any(ord(c) < 32 for c in raw):
+        raise gr.Error(
+            f"'{path_str}' isn't a valid folder path — it contains characters the OS "
+            f'forbids (< > : " | ? * or line breaks). Use a path like D:\\my-folder.'
+        )
+    return Path(raw)
+
+
+def _allowed_media_paths() -> list[str]:
+    """Folders Gradio is allowed to serve images from. The app writes generated
+    images to run folders AND to arbitrary user-chosen output folders on any
+    drive, so we allow the configured roots plus every present drive root.
+    Acceptable only because the server binds to localhost with no auth (see the
+    note on demo.launch)."""
+    paths = {str(settings.runs_dir), str(settings.output_root),
+             str(settings.shot_plans_dir)}
+    if os.name == "nt":
+        paths |= {f"{d}:\\" for d in string.ascii_uppercase if Path(f"{d}:\\").exists()}
+    else:
+        paths.add("/")
+    return sorted(paths)
 
 
 def _plan_df(subject: str) -> pd.DataFrame:
@@ -125,7 +180,7 @@ def do_generate(files: list[str], folder: str, plan_df: pd.DataFrame, engine: st
                 subject_prompt: str, gen_dir_prev: str, results_state,
                 progress=gr.Progress()):
     sources = _inputs(files, folder)
-    out_dir = Path(gen_dir_prev) if gen_dir_prev.strip() else _stamped("generated")
+    out_dir = _validate_out_dir(gen_dir_prev) if gen_dir_prev.strip() else _stamped("generated")
     shots = _df_to_shots(plan_df)
     log: list[str] = []
 
@@ -133,10 +188,16 @@ def do_generate(files: list[str], folder: str, plan_df: pd.DataFrame, engine: st
         log.append(msg)
         progress((len(log), len(shots) + 2), desc=msg)
 
-    results = pipeline.generate_shots(
-        sources, shots, engine, out_dir, cloud_model=cloud_model,
-        isolate_angles=isolate_angles, subject_prompt=subject_prompt or "character",
-        isolation_backend=isolation_backend, progress=report)
+    try:
+        results = pipeline.generate_shots(
+            sources, shots, engine, out_dir, cloud_model=cloud_model,
+            isolate_angles=isolate_angles, subject_prompt=subject_prompt or "character",
+            isolation_backend=isolation_backend, progress=report)
+    except OSError as e:
+        raise gr.Error(f"Couldn't write to '{out_dir}': {e}. Check the output folder "
+                       f"path (valid drive, no forbidden characters, writable).")
+    except Exception as e:
+        raise gr.Error(f"Generation failed: {e}")
     gallery, keep = _gen_gallery(results)
     return results, gallery, keep, "\n".join(log), str(out_dir), str(out_dir)
 
@@ -204,12 +265,56 @@ def load_caption_folder(folder: str):
     return gallery, gr.CheckboxGroup(choices=names, value=names), note
 
 
+def _resolve_captioner_config(captioner_key: str, gemini_model: str):
+    """Return (model_override, spec_overrides) for the chosen captioner.
+
+    - Gemini captioner: the model dropdown chooses the model.
+    - Custom endpoint: pull the saved base URL / model / key-env / spacing.
+    - Everything else: use the captioner's built-in config unchanged.
+    """
+    spec = CAPTIONERS_BY_KEY[captioner_key]
+    if captioner_key == "custom":
+        from studio import user_config
+
+        cfg = user_config.get_custom_captioner()
+        if not cfg.get("base_url"):
+            raise gr.Error(
+                "Configure the custom endpoint first — open 'Custom endpoint settings', "
+                "enter a base URL (e.g. https://openrouter.ai/api/v1) and model, then "
+                "click 💾 Save endpoint."
+            )
+        overrides = {
+            "base_url": cfg["base_url"],
+            "api_key_env": cfg.get("api_key_env", ""),
+            "min_interval_s": cfg.get("min_interval_s", 0.0),
+        }
+        return cfg.get("model", ""), overrides
+    if spec.backend == "gemini":
+        return gemini_model.strip(), None
+    return "", None
+
+
+def save_custom_captioner(base_url: str, model: str, api_key_env: str,
+                          min_interval_s) -> str:
+    from studio import user_config
+
+    if not base_url.strip():
+        raise gr.Error("Enter the endpoint base URL (e.g. https://openrouter.ai/api/v1).")
+    user_config.set_custom_captioner(base_url, model, api_key_env, min_interval_s or 0)
+    key_note = (f" Reads the API key from the `{api_key_env.strip()}` env var (set it in "
+                f".env)." if api_key_env.strip() else " No API key configured.")
+    return (f"✅ Saved custom endpoint: {base_url.strip().rstrip('/')} "
+            f"(model: {model.strip() or 'server default'}).{key_note} "
+            f"Select the 'Custom OpenAI-compatible endpoint' captioner to use it.")
+
+
 def do_test_caption(folder: str, selected: list[str], captioner_key: str,
-                    name: str, trigger: str):
+                    name: str, trigger: str, gemini_model: str):
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select at least one image first.")
     path = Path(folder.strip()) / selected[0]
-    cap = Captioner(captioner_key)
+    model_override, spec_overrides = _resolve_captioner_config(captioner_key, gemini_model)
+    cap = Captioner(captioner_key, model_override=model_override, spec_overrides=spec_overrides)
     try:
         raw = cap.caption(path, subject=name or "the character")
     except Exception as e:
@@ -242,11 +347,12 @@ def _editor_choices(folder: str):
 
 
 def do_caption(folder: str, selected: list[str], captioner_key: str,
-               name: str, trigger: str, progress=gr.Progress()):
+               name: str, trigger: str, gemini_model: str, progress=gr.Progress()):
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select the images to caption first.")
     base = Path(folder.strip())
     images = [base / s for s in selected]
+    model_override, spec_overrides = _resolve_captioner_config(captioner_key, gemini_model)
     log: list[str] = []
 
     def report(msg: str):
@@ -254,14 +360,16 @@ def do_caption(folder: str, selected: list[str], captioner_key: str,
         progress((len(log), len(images) + 2), desc=msg)
 
     try:
-        items = caption_images(images, captioner_key, name, trigger, progress=report)
+        items = caption_images(images, captioner_key, name, trigger, progress=report,
+                               model_override=model_override, spec_overrides=spec_overrides)
     except Exception as e:
         raise gr.Error(f"Captioning failed: {e}")
     for img, caption in items:
         img.with_suffix(".txt").write_text(caption, encoding="utf-8")
     gallery, boxes, note = load_caption_folder(folder)
     result = f"✅ Wrote {len(items)} caption sidecar(s) in {base}"
-    return gallery, boxes, result, "\n".join(log), str(base)
+    # Last two outputs auto-fill ④ Export's name/trigger so they carry across.
+    return gallery, boxes, result, "\n".join(log), str(base), name, trigger
 
 
 # ---------- ④ export ----------
@@ -287,11 +395,29 @@ def do_export(folders_text: str, name: str, trigger: str, output_root: str):
     metadata = {"character_name": name, "trigger": trigger,
                 "source_folders": [str(f) for f in folders],
                 "skipped_uncaptioned": missing}
-    ds = package_dataset(items, Path(output_root), name, trigger, metadata)
-    sample = next(ds.glob("*.txt")).read_text(encoding="utf-8")
-    skipped = f"\n⚠️ Skipped (no caption): {', '.join(missing)}" if missing else ""
-    result = (f"✅ Dataset ready: {ds}  ({len(items)} image/caption pairs){skipped}"
-              f"\n\nSample caption:\n{sample}")
+    out_root = _validate_out_dir(output_root)
+    try:
+        ds = package_dataset(items, out_root, name, trigger, metadata)
+    except OSError as e:
+        raise gr.Error(f"Couldn't write the dataset to '{out_root}': {e}. Check the "
+                       f"output folder path (valid drive, no forbidden characters, writable).")
+    # Show the first numbered caption (README.txt is excluded); flag empties so
+    # a silently blank caption is obvious rather than looking like a UI glitch.
+    caption_files = sorted(p for p in ds.glob("*.txt") if p.name != "README.txt")
+    samples = [(p.name, p.read_text(encoding="utf-8").strip()) for p in caption_files]
+    empties = [n for n, t in samples if not t]
+    first = next(((n, t) for n, t in samples if t), None)
+    if first:
+        sample_block = f"\n\nSample caption ({first[0]}):\n{first[1]}"
+    else:
+        sample_block = ("\n\n⚠️ Every exported caption is EMPTY — re-run ③ Caption "
+                        "(if you used a Groq/thinking model, update the app so its "
+                        "reasoning is disabled).")
+    skipped = f"\n⚠️ Skipped (no caption sidecar): {', '.join(missing)}" if missing else ""
+    empty_note = (f"\n⚠️ {len(empties)} exported caption(s) are empty: "
+                  f"{', '.join(empties)}" if empties and first else "")
+    result = (f"✅ Dataset ready: {ds}  ({len(items)} image/caption pairs)"
+              f"{skipped}{empty_note}{sample_block}")
     return result, str(ds)  # second value auto-fills the ⑤ Train tab
 
 
@@ -419,6 +545,21 @@ def refresh_cloud_models(force: bool = False):
     return gr.Dropdown(choices=models,
                        value=models[0][1] if models else settings.gemini_image_model)
 
+
+def refresh_caption_models():
+    """Live-pull the current Gemini caption model list (Caption tab)."""
+    from studio.engines.gemini import list_caption_models
+
+    try:
+        models = list_caption_models(force_refresh=True)
+    except Exception as e:
+        raise gr.Error(f"Could not list caption models: {e}")
+    value = _DEFAULT_CAPTION_MODEL
+    ids = [m[1] for m in models]
+    if value not in ids and ids:
+        value = ids[0]
+    return gr.Dropdown(choices=models, value=value)
+
 # ---------- layout ----------
 
 with gr.Blocks(title="LoRA Dataset Studio") as demo:
@@ -428,6 +569,34 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
         "on any folder — or run them in order and each step auto-fills the next: "
         "**① Preprocess → ② Generate & curate → ③ Caption → ④ Export → ⑤ Train config**."
     )
+    gr.Markdown(
+        "> ⚠️ **Cloud options cost money and you are responsible for what you make.** "
+        "Gemini image generation and Gemini captioning are **billed by Google to your own "
+        "API key**; any custom endpoint you add is billed to you by that provider. You are "
+        "solely responsible for the images you upload and the content you generate, caption, "
+        "or send to third-party services — make sure you have the rights to your sources and "
+        "comply with each provider's policies and the law. See **Costs & your responsibility** below."
+    )
+    with gr.Accordion("💲 Costs & your responsibility (read me)", open=False):
+        gr.Markdown(
+            "**Costs**\n"
+            "- **Local options are free** (your GPU/CPU): ComfyUI generation, built-in SAM3 "
+            "isolation, local `transformers` captioners, LM Studio/Ollama.\n"
+            "- **Gemini image generation** (② Generate, Cloud engine) and **Gemini captioning** "
+            "(③ Caption, Gemini captioner) are **billed by Google to the API key you provide**. "
+            "In-app prices are build-time estimates — always check current Google pricing.\n"
+            "- **Groq** captioning uses its free tier (rate-limited). **Custom OpenAI-compatible "
+            "endpoints** you add are billed to you by whoever runs them (OpenRouter, etc.).\n"
+            "- This tool never bills you and takes no cut — all charges are between you and the "
+            "provider whose key you supply.\n\n"
+            "**Your responsibility**\n"
+            "- You are **solely responsible** for the source images you supply and for everything "
+            "you generate, caption, export, or transmit with this tool.\n"
+            "- Only use images you have the rights to. Respect each model/provider's acceptable-use "
+            "policy and all applicable laws when generating or sending content.\n"
+            "- This software is provided under the MIT License **with no warranty**; the authors are "
+            "not liable for your use of it, for provider charges, or for content you create with it."
+        )
     results_state = gr.State([])
 
     with gr.Tabs():
@@ -525,6 +694,34 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                     captioner = gr.Dropdown(CAPTIONER_CHOICES, value=settings.default_captioner,
                                             label="Captioner")
                     cap_cost = gr.Markdown()
+                    cap_gemini_model = gr.Dropdown(
+                        CAPTION_MODEL_CHOICES, value=_DEFAULT_CAPTION_MODEL,
+                        label="Gemini caption model (only used by the Gemini captioner)")
+                    btn_refresh_cap_models = gr.Button("🔄 Refresh Gemini model list from API")
+                    _custom_cfg = _uc_boot.get_custom_captioner()
+                    with gr.Accordion("Custom endpoint settings (for the 'Custom …' captioner)",
+                                      open=False):
+                        gr.Markdown(
+                            "Point at any **OpenAI-compatible** chat/vision endpoint "
+                            "(OpenRouter, vLLM, a local proxy, …). **You pay that provider** "
+                            "and are responsible for what you send. 429s are retried with "
+                            "backoff; set spacing below if you hit limits.")
+                        cap_custom_url = gr.Textbox(
+                            label="Base URL", value=_custom_cfg.get("base_url", ""),
+                            placeholder="https://openrouter.ai/api/v1")
+                        cap_custom_model = gr.Textbox(
+                            label="Model (blank = first model the server lists)",
+                            value=_custom_cfg.get("model", ""),
+                            placeholder="qwen/qwen2.5-vl-72b-instruct")
+                        cap_custom_keyenv = gr.Textbox(
+                            label="API key env var name (blank if none; set the key itself in .env)",
+                            value=_custom_cfg.get("api_key_env", ""),
+                            placeholder="OPENROUTER_API_KEY")
+                        cap_custom_interval = gr.Number(
+                            label="Min seconds between requests (0 = no spacing)",
+                            value=_custom_cfg.get("min_interval_s", 0.0), precision=1)
+                        btn_save_custom = gr.Button("💾 Save endpoint")
+                        cap_custom_note = gr.Markdown()
                     btn_test = gr.Button("🧪 Test caption on first selected image")
                     btn_caption = gr.Button("③ Caption selected images", variant="primary")
                 with gr.Column(scale=2):
@@ -640,10 +837,18 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                     + (f"  |  VRAM: {next(c.vram_note for c in CAPTIONERS if c.key == key)}"
                        if next(c.vram_note for c in CAPTIONERS if c.key == key) else ""),
         [captioner], [cap_cost])
-    btn_test.click(do_test_caption, [cap_folder, cap_select, captioner, cap_name, cap_trigger],
+    btn_refresh_cap_models.click(refresh_caption_models, [], [cap_gemini_model])
+    btn_save_custom.click(
+        save_custom_captioner,
+        [cap_custom_url, cap_custom_model, cap_custom_keyenv, cap_custom_interval],
+        [cap_custom_note])
+    btn_test.click(do_test_caption,
+                   [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model],
                    [test_caption])
-    btn_caption.click(do_caption, [cap_folder, cap_select, captioner, cap_name, cap_trigger],
-                      [cap_gallery, cap_select, cap_result, log_box, exp_folders]) \
+    btn_caption.click(
+        do_caption,
+        [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model],
+        [cap_gallery, cap_select, cap_result, log_box, exp_folders, exp_name, exp_trigger]) \
                .then(_editor_choices, [cap_folder], [cap_edit_file])
 
     btn_export.click(do_export, [exp_folders, exp_name, exp_trigger, output_root],
@@ -661,4 +866,8 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
 if __name__ == "__main__":
     # Bound to localhost on purpose: no auth layer, and .env keys are reachable
     # through the process. Do not expose publicly / use share=True.
-    demo.launch(server_name="127.0.0.1", server_port=7861, inbrowser=True)
+    # allowed_paths lets the galleries display images written to user-chosen
+    # output folders on any drive (Gradio otherwise refuses paths outside the
+    # CWD/temp dir). Safe only because of the localhost-only bind above.
+    demo.launch(server_name="127.0.0.1", server_port=7861, inbrowser=True,
+                allowed_paths=_allowed_media_paths())

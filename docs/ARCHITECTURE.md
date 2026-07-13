@@ -1,6 +1,6 @@
 # Architecture
 
-Version: 0.3.0
+Version: 0.3.1
 
 ```
 app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)
@@ -12,7 +12,9 @@ studio/
   preprocess.py         Restore (comfyui|basic|auto) + isolate + resize
   isolate.py            Subject isolation: builtin SAM3 (transformers) | comfyui
   captioner.py          Captioner backends (transformers | gemini | openai-compat),
-                        caption finalization, standalone caption_folder()
+                        caption finalization, standalone caption_folder().
+                        Captioner takes model_override (Gemini model picker) and
+                        spec_overrides (runtime config for the custom endpoint)
   quality.py            Advisory sharpness check (variance of Laplacian, numpy-only)
   package.py            Dataset export (NN.png/NN.txt + metadata.json + README.txt)
   shotplan.py           Default shot plan (curated 24 shots: angles, poses, emotions,
@@ -21,13 +23,15 @@ studio/
   plan_io.py            Save/load shot plans as YAML (user-editable prompt libraries)
   trainer_configs.py    Emit LoRA-trainer configs (ai-toolkit config.yaml / musubi
                         dataset.toml) + run-command builders + model registry
-  user_config.py        Persist trainer install paths + last training settings to
-                        .cache/user_settings.json (paths only; gitignored)
+  user_config.py        Persist trainer install paths, last training settings, and the
+                        custom captioner endpoint (URL/model/key-env-NAME/spacing) to
+                        .cache/user_settings.json (no secrets; gitignored)
   comfy_api.py          Thin ComfyUI HTTP client (upload, queue, poll, fetch, free)
   engines/
     base.py             Engine protocol + GenerationError
     gemini.py           Cloud engine (Gemini image models via google-genai) with
-                        a cached, force-refreshable model list
+                        cached, force-refreshable image- AND caption-model lists
+                        (list_image_models / list_caption_models)
     comfyui.py          Local engine (Qwen Image Edit 2511 + Multiple-Angles LoRA)
   comfy_workflows/*.json  API-format ComfyUI graphs (restore, isolate ×2, qwen edit)
 ```
@@ -83,12 +87,26 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
   shots combines a unique angle/pose/emotion/setting. Scene/lighting is folded into
   other shot kinds so the dataset is not skewed by many images of the same standing
   pose with different backgrounds.
-- **Gemini model list is cached locally.** `studio/engines/gemini.py` persists the
-  live model list to `.cache/gemini_image_models.json` with a 24-hour TTL. The UI
-  loads from cache; a force-refresh button bypasses the TTL.
-- **Groq rate limits are honored per model.** `groq-llama4-scout` and `groq-qwen3.6`
-  use different `min_interval_s` values reflecting their free-tier TPM limits; 429
-  responses are retried with exponential backoff.
+- **Gemini model lists are cached locally.** `studio/engines/gemini.py` persists the
+  live image-model list to `.cache/gemini_image_models.json` and the caption-model list
+  to `.cache/gemini_caption_models.json`, both with a 24-hour TTL. The UI seeds each
+  dropdown from cache (never a network call on startup); a refresh button force-pulls.
+  Both fall back to a static list if the API is unreachable or no key is set.
+- **Gemini caption default is a rolling alias.** The Gemini captioner defaults to
+  `gemini-flash-latest` so it doesn't 404 when a pinned version is decommissioned (as
+  `gemini-2.5-flash` was for new keys). The Caption tab can refresh and pick a specific
+  model; `Captioner(model_override=...)` applies it only when the backend is Gemini.
+- **Groq Qwen3.6 is a reasoning model.** Its spec sets `extra_params={"reasoning_effort":
+  "none"}` to switch off the `<think>` scratchpad (otherwise the token budget is spent
+  on reasoning and the caption comes back empty/truncated), plus a higher `max_tokens`
+  as insurance and `_clean()` strips any residual `<think>` tags. 429s are retried with
+  backoff; `min_interval_s` spaces requests for the free tier.
+- **Custom OpenAI-compatible captioner.** The `custom` captioner carries no endpoint in
+  config; the Caption tab collects base URL / model / key-env-NAME / request spacing and
+  persists them (minus the secret) via `user_config.set_custom_captioner`. At caption
+  time `_resolve_captioner_config` loads them into `spec_overrides`, applied with
+  `CaptionerSpec.model_copy(update=...)` so the registry spec is never mutated. The same
+  429-backoff + spacing path as Groq applies. The API key is read from the named env var.
 - **ComfyUI caches model combo lists**; a freshly downloaded model file may need a
   ComfyUI restart before the bundled workflows validate.
 - **Model filenames are configuration.** The bundled workflow JSONs are patched at load
@@ -110,9 +128,23 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
   outfit into both prompts just before the engine runs (idempotent), so the column stays
   functional even if prompt cells were hand-edited. Default shots leave outfit empty to
   avoid identity drift.
-- **`user_settings.json` holds paths only.** Trainer install paths + last hyperparameters
-  live in `.cache/user_settings.json` (gitignored). API keys never go there — they stay
-  in `.env`/environment.
+- **`user_settings.json` holds no secrets.** Trainer install paths, last hyperparameters,
+  and the custom endpoint (URL/model/key-env-NAME/spacing) live in
+  `.cache/user_settings.json` (gitignored). API keys never go there — only the *name* of
+  the env var that holds the key; the secret stays in `.env`/environment.
+- **Gradio only serves whitelisted paths.** The galleries display images the app writes
+  to user-chosen output folders, which can be on any drive. Gradio refuses paths outside
+  the CWD/temp by default (`InvalidPathError`), so `demo.launch(allowed_paths=...)` is
+  fed the configured run/dataset roots plus every present drive root. This is acceptable
+  only because the server binds to localhost with no auth (see Security posture).
+- **User-entered output paths are validated.** `_validate_out_dir` in `app.py` rejects
+  paths with characters the OS forbids (`< > : " | ? *`, control chars) with a friendly
+  message, and the generate/export handlers wrap writes in `try/except OSError` — a bad
+  path (e.g. a stray `|`) surfaces as a GUI hint, not a raw traceback.
+- **Export sample caption is deterministic and empty-aware.** `do_export` sorts the
+  numbered `.txt` files (excluding `README.txt`), shows the first non-empty one, and
+  explicitly flags when captions are empty — so a blank-caption bug (e.g. a thinking
+  model burning the token budget) is visible instead of looking like a UI glitch.
 
 ## Roadmap / deferred
 
@@ -140,7 +172,14 @@ Deferred (with rationale):
 ## Security posture
 
 - UI binds to `127.0.0.1`; no auth layer, so it must not be exposed (`share=True` is
-  deliberately not used).
+  deliberately not used). `allowed_paths` is widened to drive roots so galleries can
+  display images in arbitrary user output folders — this lets the localhost file route
+  serve any file on those drives, which is only acceptable given the localhost bind. Do
+  not expose the app; do not add `share=True`.
+- **Costs and content are the user's responsibility**, stated in-app (header banner +
+  "Costs & your responsibility" accordion) and in the README. Cloud calls bill the user's
+  own key; custom endpoints bill whatever provider the user points at. No charges flow
+  through this project.
 - API keys live in `.env` (gitignored; `setup.sh` chmods it 600) or the environment,
   and are only sent to their own vendor endpoints.
 - No telemetry; the only network calls are the ones the selected backends require.

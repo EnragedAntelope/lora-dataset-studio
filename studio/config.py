@@ -63,6 +63,11 @@ class CaptionerSpec(BaseModel):
     base_url: str = ""  # openai backend endpoint
     api_key_env: str = ""  # env var holding the key ("" = no key needed)
     min_interval_s: float = 0.0  # request spacing (free-tier rate limits)
+    max_tokens: int = 400  # completion budget (raise for reasoning models)
+    # Extra JSON body fields merged into the openai request — e.g. Groq's
+    # {"reasoning_effort": "none"} to switch off a thinking model's scratchpad
+    # so we get only the caption (and don't burn the token budget on reasoning).
+    extra_params: dict = {}
     prompt_template: str = _BASE_PROMPT  # must contain {subject}
     # "qwen_vl" and "llava" share one transformers code path but need
     # different chat-template quirks (JoyCaption wants its system prompt).
@@ -96,23 +101,14 @@ CAPTIONERS: list[CaptionerSpec] = [
     ),
     CaptionerSpec(
         key="gemini-flash",
-        label="Cloud: Gemini 2.5 Flash (Google API key, SFW)",
+        label="Cloud: Gemini Flash (Google API key, SFW)",
         backend="gemini",
-        model="gemini-2.5-flash",
+        # Rolling alias so this never 404s when a pinned version is retired.
+        # The Caption tab can live-refresh and pick a specific model.
+        model="gemini-flash-latest",
         api_key_env="GEMINI_API_KEY",
         nsfw_capable=False,
-        cost_note="~$0.001/image (estimate at build time — check current pricing)",
-    ),
-    CaptionerSpec(
-        key="groq-llama4-scout",
-        label="Cloud: Groq Llama 4 Scout (free tier, SFW)",
-        backend="openai",
-        base_url="https://api.groq.com/openai/v1",
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
-        api_key_env="GROQ_API_KEY",
-        min_interval_s=2.5,
-        nsfw_capable=False,
-        cost_note="free tier (rate-limited; 30K TPM)",
+        cost_note="billed by Google to your key (~$0.001/img est. — check current pricing)",
     ),
     CaptionerSpec(
         key="groq-qwen3.6",
@@ -121,9 +117,14 @@ CAPTIONERS: list[CaptionerSpec] = [
         base_url="https://api.groq.com/openai/v1",
         model="qwen/qwen3.6-27b",
         api_key_env="GROQ_API_KEY",
-        min_interval_s=3.0,  # lower free-tier TPM (8K) than Scout
+        min_interval_s=3.0,  # respect the free-tier 8K TPM limit
         nsfw_capable=False,
-        cost_note="free tier (rate-limited; 8K TPM, lower throughput than Scout)",
+        cost_note="free tier (rate-limited; 8K TPM)",
+        # Qwen3.6 is a reasoning model; "none" disables its <think> scratchpad
+        # so the response is just the caption. Keep a slightly higher token
+        # budget as insurance if a future model ignores the flag.
+        max_tokens=800,
+        extra_params={"reasoning_effort": "none"},
     ),
     CaptionerSpec(
         key="lmstudio",
@@ -136,6 +137,14 @@ CAPTIONERS: list[CaptionerSpec] = [
         label="Advanced: Ollama (first vision model served)",
         backend="openai",
         base_url="http://127.0.0.1:11434/v1",
+    ),
+    CaptionerSpec(
+        key="custom",
+        label="Advanced: Custom OpenAI-compatible endpoint (you configure it)",
+        backend="openai",
+        # base_url / model / api_key_env / min_interval_s are supplied at
+        # runtime from the Caption tab (persisted, minus the key, in user_config).
+        cost_note="billed to you by whoever runs the endpoint",
     ),
 ]
 
@@ -160,15 +169,16 @@ CLOUD_IMAGE_PRICES = {
 # then to CLOUD_IMAGE_PRICES if the API is unreachable.
 CACHE_DIR = REPO_ROOT / ".cache"
 MODEL_CACHE_FILE = CACHE_DIR / "gemini_image_models.json"
+CAPTION_MODEL_CACHE_FILE = CACHE_DIR / "gemini_caption_models.json"
 MODEL_CACHE_TTL_HOURS = 24
 
 
-def load_cloud_model_cache() -> list[dict] | None:
-    """Return cached model entries if the cache exists and is fresh."""
-    if not MODEL_CACHE_FILE.exists():
+def _load_model_cache_file(path: Path) -> list[dict] | None:
+    """Return cached model entries from `path` if it exists and is fresh."""
+    if not path.exists():
         return None
     try:
-        data = json.loads(MODEL_CACHE_FILE.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         cached_at = datetime.fromisoformat(data["cached_at"])
         age = datetime.now(tz=timezone.utc) - cached_at
         if age > timedelta(hours=MODEL_CACHE_TTL_HOURS):
@@ -178,16 +188,36 @@ def load_cloud_model_cache() -> list[dict] | None:
         return None
 
 
-def save_cloud_model_cache(models: list[dict]) -> None:
-    """Persist the live model list with a timestamp."""
+def _save_model_cache_file(path: Path, models: list[dict]) -> None:
+    """Persist a live model list to `path` with a timestamp."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    MODEL_CACHE_FILE.write_text(
+    path.write_text(
         json.dumps(
             {"cached_at": datetime.now(tz=timezone.utc).isoformat(), "models": models},
             indent=2,
         ),
         encoding="utf-8",
     )
+
+
+def load_cloud_model_cache() -> list[dict] | None:
+    """Return cached image-model entries if the cache exists and is fresh."""
+    return _load_model_cache_file(MODEL_CACHE_FILE)
+
+
+def save_cloud_model_cache(models: list[dict]) -> None:
+    """Persist the live image-model list with a timestamp."""
+    _save_model_cache_file(MODEL_CACHE_FILE, models)
+
+
+def load_caption_model_cache() -> list[dict] | None:
+    """Return cached Gemini caption-model entries if fresh."""
+    return _load_model_cache_file(CAPTION_MODEL_CACHE_FILE)
+
+
+def save_caption_model_cache(models: list[dict]) -> None:
+    """Persist the live Gemini caption-model list with a timestamp."""
+    _save_model_cache_file(CAPTION_MODEL_CACHE_FILE, models)
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 

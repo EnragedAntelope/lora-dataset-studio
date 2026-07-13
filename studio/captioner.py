@@ -30,8 +30,17 @@ _JOYCAPTION_SYSTEM = "You are a helpful image captioner."
 
 
 class Captioner:
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str, model_override: str = "",
+                 spec_overrides: dict | None = None) -> None:
         self.spec: CaptionerSpec = CAPTIONERS_BY_KEY[key]
+        # spec_overrides carries runtime config for the "custom" endpoint
+        # (base_url / api_key_env / min_interval_s / model) so users can point
+        # at any OpenAI-compatible server without editing config.py.
+        if spec_overrides:
+            self.spec = self.spec.model_copy(update=spec_overrides)
+        # Let the UI pick a specific model (e.g. a live-refreshed Gemini model,
+        # or a custom OpenAI-compatible endpoint's model) without editing config.
+        self.model = (model_override or self.spec.model).strip()
         self._model = None
         self._processor = None
         self._last_request = 0.0
@@ -123,7 +132,7 @@ class Captioner:
 
         client = genai.Client(api_key=key)
         resp = client.models.generate_content(
-            model=self.spec.model,
+            model=self.model or "gemini-flash-latest",
             contents=[
                 types.Part.from_bytes(data=image_path.read_bytes(), mime_type="image/png"),
                 instruction,
@@ -136,6 +145,11 @@ class Captioner:
     # ---------- OpenAI-compatible backend (Groq, LM Studio, Ollama) ----------
 
     def _caption_openai(self, image_path: Path, instruction: str) -> str:
+        if not self.spec.base_url:
+            raise RuntimeError(
+                f"{self.spec.label} has no endpoint URL. Enter a base URL "
+                f"(e.g. https://openrouter.ai/api/v1) and save it first."
+            )
         if self.spec.min_interval_s:  # respect free-tier rate limits
             wait = self.spec.min_interval_s - (time.monotonic() - self._last_request)
             if wait > 0:
@@ -151,11 +165,11 @@ class Captioner:
                 )
             headers["Authorization"] = f"Bearer {key}"
 
-        model = self.spec.model or self._first_served_model(headers)
+        model = self.model or self._first_served_model(headers)
         b64 = base64.b64encode(image_path.read_bytes()).decode()
         payload = {
             "model": model,
-            "max_tokens": 400,
+            "max_tokens": self.spec.max_tokens,
             "temperature": 0.6,
             "messages": [
                 {
@@ -167,6 +181,7 @@ class Captioner:
                     ],
                 }
             ],
+            **self.spec.extra_params,  # e.g. {"reasoning_effort": "none"} for Groq Qwen
         }
         for attempt in range(4):
             r = httpx.post(f"{self.spec.base_url}/chat/completions", json=payload,
@@ -224,6 +239,8 @@ def caption_images(
     character_name: str = "",
     trigger: str = "",
     progress: Callable[[str], None] = print,
+    model_override: str = "",
+    spec_overrides: dict | None = None,
 ) -> list[tuple[Path, str]]:
     """Caption a list of images. Standalone — no run/pipeline state needed.
 
@@ -231,7 +248,8 @@ def caption_images(
     loaded once and freed afterwards.
     """
     subject = character_name or "the character"
-    cap = Captioner(captioner_key)
+    cap = Captioner(captioner_key, model_override=model_override,
+                    spec_overrides=spec_overrides)
     if cap.spec.backend == "transformers":
         from studio import comfy_api
 
@@ -264,6 +282,8 @@ def caption_folder(
     trigger: str = "",
     only: list[Path] | None = None,
     progress: Callable[[str], None] = print,
+    model_override: str = "",
+    spec_overrides: dict | None = None,
 ) -> list[tuple[Path, str]]:
     """Caption images in `folder` (all, or the subset in `only`) and write
     .txt sidecars next to each image. The classic 'point at a folder and tag
@@ -273,7 +293,8 @@ def caption_folder(
     images = only if only else list_images(folder)
     if not images:
         raise RuntimeError(f"No images found in {folder}")
-    items = caption_images(images, captioner_key, character_name, trigger, progress)
+    items = caption_images(images, captioner_key, character_name, trigger, progress,
+                           model_override=model_override, spec_overrides=spec_overrides)
     for img, caption in items:
         img.with_suffix(".txt").write_text(caption, encoding="utf-8")
     progress(f"Wrote {len(items)} .txt sidecar(s) in {folder}")

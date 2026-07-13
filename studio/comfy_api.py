@@ -103,7 +103,10 @@ def run_prompt(graph: dict, timeout: float = 600.0) -> list[dict]:
     if backlog > 10:
         raise ComfyError(
             f"ComfyUI queue is busy: {backlog} jobs already pending. This app's jobs "
-            f"would wait behind them — clear or finish the ComfyUI queue first."
+            f"would wait behind them. Open ComfyUI ({settings.comfy_url}) and clear the "
+            f"queue (Queue panel → Clear, or the Manager's 'Clear Queue'), or let it "
+            f"finish, then retry. To generate without ComfyUI, switch the engine to the "
+            f"Cloud (Gemini) option, or set the isolation/restore backend to Built-in/Basic."
         )
     r = httpx.post(f"{settings.comfy_url}/prompt", json={"prompt": graph}, timeout=30)
     if r.status_code != 200:

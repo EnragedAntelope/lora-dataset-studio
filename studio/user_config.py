@@ -54,3 +54,24 @@ def get_last_train_settings() -> dict[str, Any]:
 
 def set_last_train_settings(settings: dict[str, Any]) -> None:
     save_user_config({"last_train": settings})
+
+
+# --- custom OpenAI-compatible captioner endpoint --------------------------
+# Stores the endpoint URL, model name, the *name* of the env var holding the
+# key, and request spacing. The API key itself is NEVER stored here — it stays
+# in .env/environment under the env-var name recorded below.
+_CUSTOM_KEYS = ("base_url", "model", "api_key_env", "min_interval_s")
+
+
+def get_custom_captioner() -> dict[str, Any]:
+    return load_user_config().get("custom_captioner", {})
+
+
+def set_custom_captioner(base_url: str, model: str, api_key_env: str,
+                         min_interval_s: float) -> None:
+    save_user_config({"custom_captioner": {
+        "base_url": base_url.strip().rstrip("/"),
+        "model": model.strip(),
+        "api_key_env": api_key_env.strip(),
+        "min_interval_s": float(min_interval_s or 0),
+    }})
