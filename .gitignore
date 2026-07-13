@@ -4,3 +4,6 @@ runs/
 datasets/
 __pycache__/
 *.pyc
+.cache/
+tests/__pycache__/
+.pytest_cache/

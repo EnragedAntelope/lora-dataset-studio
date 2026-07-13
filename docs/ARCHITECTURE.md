@@ -1,5 +1,7 @@
 # Architecture
 
+Version: 0.2.0
+
 ```
 app.py                  Gradio UI — thin wiring over the stage functions
 cli.py                  Typer CLI — one subcommand per stage + `build` for all four
@@ -12,11 +14,13 @@ studio/
   captioner.py          Captioner backends (transformers | gemini | openai-compat),
                         caption finalization, standalone caption_folder()
   package.py            Dataset export (NN.png/NN.txt + metadata.json + README.txt)
-  shotplan.py           Default shot plan (12 angles / 8 poses / 8 scenes) + Shot model
+  shotplan.py           Default shot plan (curated 24 shots: angles, poses, emotions,
+                        settings merged into each shot) + Shot model
   comfy_api.py          Thin ComfyUI HTTP client (upload, queue, poll, fetch, free)
   engines/
     base.py             Engine protocol + GenerationError
-    gemini.py           Cloud engine (Gemini image models via google-genai)
+    gemini.py           Cloud engine (Gemini image models via google-genai) with
+                        a cached, force-refreshable model list
     comfyui.py          Local engine (Qwen Image Edit 2511 + Multiple-Angles LoRA)
   comfy_workflows/*.json  API-format ComfyUI graphs (restore, isolate ×2, qwen edit)
 ```
@@ -58,14 +62,24 @@ folders(s) ─④ export→ datasets/<name>-dataset/NN.png + NN.txt + metadata.j
   mask does *not* work for this.
 - **The Multiple-Angles LoRA is trained on clean splat renders** — isolating the subject
   onto white dramatically improves its output, especially direct back views. The LoRA is
-  trigger-based (`<sks>` grammar), so its strength is zeroed for pose/scene shots.
+  trigger-based (`<sks>` grammar), so its strength is 0.9 for `kind="angle"` shots and
+  zeroed for pose/emotion shots.
 - **VRAM choreography:** before loading a ~17 GB local captioner, the pipeline asks
   ComfyUI to `/free` its models (best effort) and unloads the in-process SAM3.
 - **ComfyUI queue guard:** if ComfyUI already has >10 pending jobs, the client fails
   fast instead of silently queueing behind them.
 - **Gemini refusals return no image part** — that's detected and reported as a refusal;
   retries don't help, so only transient errors are retried.
-- **Groq free tier** needs request spacing (2.5 s) plus 429 backoff — both built in.
+- **Shot plan is a curated list, not a cartesian product.** Each of the 24 default
+  shots combines a unique angle/pose/emotion/setting. Scene/lighting is folded into
+  other shot kinds so the dataset is not skewed by many images of the same standing
+  pose with different backgrounds.
+- **Gemini model list is cached locally.** `studio/engines/gemini.py` persists the
+  live model list to `.cache/gemini_image_models.json` with a 24-hour TTL. The UI
+  loads from cache; a force-refresh button bypasses the TTL.
+- **Groq rate limits are honored per model.** `groq-llama4-scout` and `groq-qwen3.6`
+  use different `min_interval_s` values reflecting their free-tier TPM limits; 429
+  responses are retried with exponential backoff.
 - **ComfyUI caches model combo lists**; a freshly downloaded model file may need a
   ComfyUI restart before the bundled workflows validate.
 - **Model filenames are configuration.** The bundled workflow JSONs are patched at load

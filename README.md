@@ -1,9 +1,9 @@
 # LoRA Dataset Studio
 
 Turn **one image** (or a few) of a character into a **ready-to-train LoRA dataset**:
-~28 consistent shots across camera angles, poses, and scenes, each with a natural-language
-caption `.txt` (trigger word first), packaged in a flat folder that drops straight into
-**ai-toolkit / OneTrainer**.
+~24 consistent shots across camera angles, poses, emotions, and settings, each with a
+natural-language caption `.txt` (trigger word first), packaged in a flat folder that drops
+straight into **ai-toolkit / OneTrainer**.
 
 **Every stage is optional and standalone.** Point any tab (or CLI subcommand) at any
 folder of images — preprocess only, generate only, caption only ("tag this folder"),
@@ -17,7 +17,7 @@ or cloud (zero GPU requirements) — mix and match per stage.
 | ① Preprocess: restore/upscale | ComfyUI model restore *(optional)* or basic Lanczos | — |
 | ① Preprocess: subject isolation | **Built-in SAM3** (no ComfyUI needed) or ComfyUI SAM3 | — |
 | ② Generate shots | ComfyUI: Qwen Image Edit 2511 + Multiple-Angles LoRA | Gemini image models (Nano Banana) |
-| ③ Caption | Local VLMs via `transformers`: Qwen3-VL-8B, JoyCaption, NSFW finetune (also LM Studio / Ollama) | Gemini 2.5 Flash, Groq free tier |
+|| ③ Caption | Local VLMs via `transformers`: Qwen3-VL-8B, JoyCaption, NSFW finetune (also LM Studio / Ollama) | Gemini 2.5 Flash, Groq free tier (Llama 4 Scout, Qwen3.6 27B) |
 | ④ Export | Always local | — |
 
 ## Quick start
@@ -40,9 +40,10 @@ You can skip all of them and stay fully local, or add them later — copy
 
 - **Google Gemini** — cloud image generation and/or Gemini captioning.
   Create a key at <https://aistudio.google.com/apikey>. **Costs are billed by Google
-  to your key.** Prices shown in the app (e.g. ~$0.13/image for `gemini-3-pro-image-preview`,
-  ≈ $4 for a 28-shot dataset) are **estimates captured at build time** — always check
-  current Google pricing.
+  to your key.** In-app prices (e.g. ~$0.134/image for `gemini-3-pro-image-preview` at 1K,
+  ~$0.067 for `gemini-3.1-flash-image-preview`, $0.039 for `gemini-2.5-flash-image`) are
+  estimates captured at build time. The model list can be live-refreshed from the API and
+  saved locally for instant dropdown loads. Always check current Google pricing.
 - **Groq** — free-tier cloud captioning (SFW; requests are auto-spaced and 429s retried).
   Create a key at <https://console.groq.com/keys>.
 - **Hugging Face token** — only for the **built-in SAM3 isolation**: `facebook/sam3` is a
@@ -64,10 +65,9 @@ restoration models, SAM3 checkpoint) and how the bundled workflow templates find
    are restored/upscaled (only when needed, or on demand), the subject is cut out onto
    a white background (SAM3; editable subject prompt, plus an "objects to remove" prompt
    for held props like microphones), and everything is sized to the target resolution.
-2. **② Generate & curate** — review/edit the shot plan (12 camera angles, 8 poses,
-   8 scene/lighting variants; every row is editable, add/remove freely), pick the engine,
-   generate. Uncheck rejects; ♻️ regenerates them with new seeds. A cost estimate is
-   shown before you spend cloud money.
+2. **② Generate & curate** — review/edit the curated shot plan (9 angles, 8 poses,
+   7 emotion close-ups; each row combines a unique setting/lighting so the dataset isn't
+   skewed toward a single standing pose). Pick the engine, generate. Uncheck rejects;
 3. **③ Caption** — point at **any** folder (not just pipeline output), select images,
    pick a captioner, and write `.txt` sidecars. 🧪 tests one caption first so you can
    compare captioners cheaply. Each captioner uses a prompt tuned to that model
@@ -95,7 +95,8 @@ Each subcommand is fully standalone; `--help` on any of them shows all options.
 | JoyCaption Beta One | your GPU, ~17 GB bf16 | purpose-built diffusion captioner |
 | Qwen3-VL-8B NSFW-Caption V4.5 | your GPU, ~17 GB bf16 | explicit-dataset specialist |
 | Gemini 2.5 Flash | Google API | SFW, ~$0.001/img (build-time estimate) |
-| Groq Llama 4 Scout | Groq API | SFW, free tier, rate-limited |
+|| Groq Llama 4 Scout | Groq API | SFW, free tier, 30K TPM |
+|| Groq Qwen3.6 27B | Groq API | SFW, free tier, 8K TPM (slower throughput than Scout) |
 | LM Studio / Ollama | your machine | advanced: whatever vision model you serve |
 
 Local models download automatically from Hugging Face on first use. Add your own in
