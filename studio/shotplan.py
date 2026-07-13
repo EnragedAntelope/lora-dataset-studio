@@ -5,18 +5,8 @@ standing pose with different backgrounds, each shot here is a unique
 combination of angle/pose/emotion/setting. This keeps the dataset size
 manageable (24 shots) while maximizing the diversity the LoRA actually learns.
 
-### Future todos (not yet implemented)
-
-- musubi-tuner dataset config generator: emit `dataset.toml` during export.
-- ostris ai-toolkit config generator: emit a `config/lora.yaml` with sensible
-  FLUX defaults (dim/alpha 32, resolution buckets, caption_ext "txt").
-- Outfit/wardrobe control so generated images can vary clothing without
-  breaking identity.
-- Automated quality scoring before export (sharpness + aesthetic check).
-- Optional regularization-image generation to reduce overfitting.
-- Bulk caption review / inline editor in the UI.
-- Face-similarity guard across multiple source images.
-- User-editable prompt libraries (YAML/JSON) for community shot plans.
+The roadmap (done + deferred items) lives in `docs/ARCHITECTURE.md` under
+"Roadmap / deferred", not here.
 """
 
 from __future__ import annotations
@@ -36,6 +26,10 @@ class Shot(BaseModel):
     # and so future tooling can filter/group shots by these dimensions.
     emotion: str = ""
     setting: str = ""
+    # Wardrobe/outfit override. Empty = keep the reference's default clothing
+    # (no identity drift). When set, "wearing {outfit}" is injected into both
+    # the local and cloud prompts so clothing can vary across the dataset.
+    outfit: str = ""
 
 
 # Each tuple is: (id_suffix, kind, <sks> grammar or pose stub, plain-English
@@ -274,26 +268,32 @@ _SHOTS = [
 ]
 
 
-def _build_local_prompt(kind: str, grammar_or_pose: str, setting: str, emotion: str) -> str:
+def _build_local_prompt(
+    kind: str, grammar_or_pose: str, setting: str, emotion: str, outfit: str = ""
+) -> str:
     """Build the ComfyUI/Qwen-Edit prompt.
 
     Angle shots keep the tight <sks> Multiple-Angles LoRA grammar so the LoRA
     can do its job; pose/emotion shots are plain English with setting/lighting
     folded in. The emotion is appended so it influences expression without
-    breaking the LoRA grammar for angles.
+    breaking the LoRA grammar for angles. An explicit outfit, when given, is
+    appended after the grammar/pose so clothing can vary.
     """
+    wardrobe = f", wearing {outfit}" if outfit else ""
     if kind == "angle":
         prompt = f"<sks> {grammar_or_pose}"
         if emotion and emotion != "neutral":
             prompt += f", {emotion} expression"
-        return prompt
+        return prompt + wardrobe
     return (
-        f"the same {{subject}}, {grammar_or_pose}, in {setting}, "
+        f"the same {{subject}}, {grammar_or_pose}{wardrobe}, in {setting}, "
         f"{emotion} mood, photorealistic, consistent identity"
     )
 
 
-def _build_cloud_prompt(subject: str, kind: str, description: str, setting: str, emotion: str) -> str:
+def _build_cloud_prompt(
+    subject: str, kind: str, description: str, setting: str, emotion: str, outfit: str = ""
+) -> str:
     """Build the plain-English Nano Banana instruction."""
     parts = [
         f"Generate a photorealistic image of exactly the same {subject} "
@@ -311,8 +311,35 @@ def _build_cloud_prompt(subject: str, kind: str, description: str, setting: str,
         parts.append(f", in {setting}")
         if emotion and emotion != "neutral":
             parts.append(f", with a {emotion} expression")
+    if outfit:
+        parts.append(f", wearing {outfit}")
     parts.append(". Keep the same overall style and realism as the reference.")
     return "".join(parts)
+
+
+def apply_wardrobe(shot: Shot) -> Shot:
+    """Return a copy of `shot` with its outfit folded into the prompts.
+
+    The outfit column is the source of truth: whatever the user types there is
+    injected as "wearing {outfit}" at generation time, so the column stays
+    functional even if the prompt cells were edited by hand. Idempotent — a
+    prompt that already mentions the outfit is left untouched.
+    """
+    if not shot.outfit:
+        return shot
+    phrase = f"wearing {shot.outfit}"
+    local = shot.local_prompt
+    cloud = shot.cloud_prompt
+    if phrase.lower() not in local.lower():
+        local = f"{local}, {phrase}"
+    if phrase.lower() not in cloud.lower():
+        # Insert before the trailing "Keep the same..." sentence when present.
+        if ". Keep the same" in cloud:
+            head, _, tail = cloud.partition(". Keep the same")
+            cloud = f"{head}, {phrase}. Keep the same{tail}"
+        else:
+            cloud = f"{cloud}, {phrase}"
+    return shot.model_copy(update={"local_prompt": local, "cloud_prompt": cloud})
 
 
 def default_plan(subject: str = "the character") -> list[Shot]:
@@ -328,6 +355,7 @@ def default_plan(subject: str = "the character") -> list[Shot]:
                 chain_from=chain,
                 emotion=emotion,
                 setting=setting,
+                outfit="",
             )
         )
     return shots

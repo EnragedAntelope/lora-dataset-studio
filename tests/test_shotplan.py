@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from studio.shotplan import default_plan
+from studio.shotplan import Shot, apply_wardrobe, default_plan
 
 
 def test_default_plan_has_24_shots() -> None:
@@ -79,3 +79,33 @@ def test_plan_includes_common_angles() -> None:
     plan = default_plan()
     ids = {s.id for s in plan}
     assert {"angle-front", "angle-back", "angle-right", "angle-left"} <= ids
+
+
+def test_default_plan_outfit_empty() -> None:
+    for shot in default_plan():
+        assert shot.outfit == ""
+
+
+def test_apply_wardrobe_noop_when_empty() -> None:
+    shot = default_plan()[0]
+    assert apply_wardrobe(shot) is shot  # untouched, same object
+
+
+def test_apply_wardrobe_injects_into_both_prompts() -> None:
+    shot = Shot(id="pose-x", kind="pose", local_prompt="the same {subject}, walking",
+                cloud_prompt="Generate ... walking. Keep the same style.",
+                outfit="a red raincoat")
+    out = apply_wardrobe(shot)
+    assert "wearing a red raincoat" in out.local_prompt
+    assert "wearing a red raincoat" in out.cloud_prompt
+    # cloud injection lands before the trailing "Keep the same" sentence
+    assert out.cloud_prompt.index("wearing") < out.cloud_prompt.index("Keep the same")
+
+
+def test_apply_wardrobe_idempotent() -> None:
+    shot = Shot(id="pose-x", kind="pose",
+                local_prompt="walking, wearing a hat", cloud_prompt="x, wearing a hat",
+                outfit="a hat")
+    out = apply_wardrobe(shot)
+    assert out.local_prompt.count("wearing a hat") == 1
+    assert out.cloud_prompt.count("wearing a hat") == 1

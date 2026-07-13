@@ -173,7 +173,6 @@ def load_cloud_model_cache() -> list[dict] | None:
         age = datetime.now(tz=timezone.utc) - cached_at
         if age > timedelta(hours=MODEL_CACHE_TTL_HOURS):
             return None
-            return None
         return data.get("models", [])
     except Exception:
         return None
@@ -214,6 +213,11 @@ class Settings(BaseSettings):
 
     output_root: Path = REPO_ROOT / "datasets"
     runs_dir: Path = REPO_ROOT / "runs"
+    shot_plans_dir: Path = REPO_ROOT / "shot_plans"
+
+    # Images whose variance-of-Laplacian sharpness score is below this are
+    # flagged (advisory only) in the curate/export views. Tune per source set.
+    sharpness_blur_threshold: float = 100.0
 
     # ComfyUI model filenames used by the optional workflow templates
     # (relative to your ComfyUI models folders — see docs/comfyui-setup.md)

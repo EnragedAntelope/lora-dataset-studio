@@ -17,7 +17,7 @@ from studio.config import settings
 from studio.engines.base import GenerationError
 from studio.package import slugify
 from studio.preprocess import PreprocessReport, preprocess
-from studio.shotplan import Shot
+from studio.shotplan import Shot, apply_wardrobe
 
 ProgressFn = Callable[[str], None]
 
@@ -106,6 +106,7 @@ def generate_shots(
 
     done: dict[str, Path] = {r.shot.id: r.path for r in results if r.path}
     for i, shot in enumerate(todo, 1):
+        shot = apply_wardrobe(shot)  # fold the outfit column into the prompts
         seed = random.randint(0, 2**48)
         out = out_dir / f"{shot.id}.png"
         shot_sources = sources

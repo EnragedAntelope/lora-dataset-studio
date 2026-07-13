@@ -1,9 +1,9 @@
 # Architecture
 
-Version: 0.2.0
+Version: 0.3.0
 
 ```
-app.py                  Gradio UI — thin wiring over the stage functions
+app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)
 cli.py                  Typer CLI — one subcommand per stage + `build` for all four
 studio/
   config.py             Settings (env/.env overridable), captioner registry with
@@ -13,9 +13,16 @@ studio/
   isolate.py            Subject isolation: builtin SAM3 (transformers) | comfyui
   captioner.py          Captioner backends (transformers | gemini | openai-compat),
                         caption finalization, standalone caption_folder()
+  quality.py            Advisory sharpness check (variance of Laplacian, numpy-only)
   package.py            Dataset export (NN.png/NN.txt + metadata.json + README.txt)
   shotplan.py           Default shot plan (curated 24 shots: angles, poses, emotions,
-                        settings merged into each shot) + Shot model
+                        settings + outfit merged into each shot) + Shot model +
+                        apply_wardrobe() outfit injection
+  plan_io.py            Save/load shot plans as YAML (user-editable prompt libraries)
+  trainer_configs.py    Emit LoRA-trainer configs (ai-toolkit config.yaml / musubi
+                        dataset.toml) + run-command builders + model registry
+  user_config.py        Persist trainer install paths + last training settings to
+                        .cache/user_settings.json (paths only; gitignored)
   comfy_api.py          Thin ComfyUI HTTP client (upload, queue, poll, fetch, free)
   engines/
     base.py             Engine protocol + GenerationError
@@ -46,6 +53,8 @@ sources ─① preprocess→ runs/<stamp>-prepped/*_prepped.png
 prepped ─② generate→ runs/<stamp>-generated/<shot-id>.png   (one per plan row)
 any folder ─③ caption→ *.txt sidecars (trigger-first, per-model prompt template)
 folders(s) ─④ export→ datasets/<name>-dataset/NN.png + NN.txt + metadata.json
+dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.toml into the
+                     dataset folder + prints the run command (optional; nothing launched)
 ```
 
 ## Gotchas (hard-won)
@@ -85,6 +94,48 @@ folders(s) ─④ export→ datasets/<name>-dataset/NN.png + NN.txt + metadata.j
 - **Model filenames are configuration.** The bundled workflow JSONs are patched at load
   time from settings (`LDS_QWEN_EDIT_MODEL` etc.), so users don't edit JSON to match
   their filenames.
+- **ai-toolkit configs are one-command; musubi configs are not.** `trainer_configs.py`
+  emits a fully runnable ai-toolkit `config.yaml` (model is a HF id, all hyperparameters
+  inline → `python run.py config.yaml`). musubi's `dataset.toml` is complete, but its
+  *training* invocation needs the user's local DiT/VAE/text-encoder paths, so the musubi
+  run command is a template with `<<FILL: ...>>` placeholders. The UI says so; it is not
+  faked as one-click.
+- **Trainer model registry is curated, not exhaustive.** Where a model's canonical HF id
+  or musubi training script isn't something we can guarantee, the preset carries a
+  `<<FILL>>` placeholder so the emitted config is honest rather than silently wrong.
+- **Sharpness is advisory.** `quality.py` labels blurry shots (`⚠ blurry (score)`) in the
+  curate gallery and lists them at export; it never deletes or blocks. Threshold is
+  tunable via `LDS_SHARPNESS_BLUR_THRESHOLD`.
+- **The outfit column is applied at generation time.** `apply_wardrobe()` folds a shot's
+  outfit into both prompts just before the engine runs (idempotent), so the column stays
+  functional even if prompt cells were hand-edited. Default shots leave outfit empty to
+  avoid identity drift.
+- **`user_settings.json` holds paths only.** Trainer install paths + last hyperparameters
+  live in `.cache/user_settings.json` (gitignored). API keys never go there — they stay
+  in `.env`/environment.
+
+## Roadmap / deferred
+
+Relocated here from `shotplan.py`. Done this revision (0.3.0):
+
+- ✅ musubi-tuner `dataset.toml` + ostris ai-toolkit `config.yaml` generators (⑤ Train tab).
+- ✅ Outfit/wardrobe control (per-shot `outfit`, folded into prompts without identity drift).
+- ✅ Sharpness quality flag before export (advisory Laplacian-variance).
+- ✅ Bulk/inline caption editor in the UI (edit any `.txt` sidecar by hand).
+- ✅ User-editable prompt libraries — save/load shot plans as YAML.
+
+Deferred (with rationale):
+
+- **In-GUI training launch** (subprocess + streamed logs): configs + saved paths + the run
+  command cover the workflow; launching is fragile across trainer venvs/CUDA setups, so it
+  is intentionally out of scope. The command is displayed, never executed.
+- **Automated aesthetic scoring** beyond sharpness: needs a heavy scoring model; the cheap
+  Laplacian check covers the common "is it blurry" case without a new dependency.
+- **Regularization-image generation**: niche for single-character LoRAs on these trainers.
+- **Face-similarity guard across multiple sources**: would add a face-recognition
+  dependency for a narrow multi-reference case.
+- **`platformdirs` cache relocation**: the repo-local `.cache/` is consistent with how the
+  app resolves `.env`/models and is self-contained; not worth the churn yet.
 
 ## Security posture
 
@@ -94,3 +145,7 @@ folders(s) ─④ export→ datasets/<name>-dataset/NN.png + NN.txt + metadata.j
   and are only sent to their own vendor endpoints.
 - No telemetry; the only network calls are the ones the selected backends require.
 - Local model weights come from Hugging Face as safetensors.
+- The ⑤ Train tab **generates and displays** config files and a run command — it never
+  executes a subprocess or shell, so there is no command-injection surface. Generated
+  configs reference the user's own model ids/paths; no credentials are embedded.
+- `.cache/user_settings.json` (gitignored) stores filesystem paths + hyperparameters only.

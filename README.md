@@ -3,7 +3,8 @@
 Turn **one image** (or a few) of a character into a **ready-to-train LoRA dataset**:
 ~24 consistent shots across camera angles, poses, emotions, and settings, each with a
 natural-language caption `.txt` (trigger word first), packaged in a flat folder that drops
-straight into **ai-toolkit / OneTrainer**.
+straight into **ai-toolkit / OneTrainer** — and can emit a ready-to-edit **training config**
+for **ai-toolkit** or **musubi-tuner**.
 
 **Every stage is optional and standalone.** Point any tab (or CLI subcommand) at any
 folder of images — preprocess only, generate only, caption only ("tag this folder"),
@@ -19,6 +20,7 @@ or cloud (zero GPU requirements) — mix and match per stage.
 | ② Generate shots | ComfyUI: Qwen Image Edit 2511 + Multiple-Angles LoRA | Gemini image models (Nano Banana) |
 || ③ Caption | Local VLMs via `transformers`: Qwen3-VL-8B, JoyCaption, NSFW finetune (also LM Studio / Ollama) | Gemini 2.5 Flash, Groq free tier (Llama 4 Scout, Qwen3.6 27B) |
 | ④ Export | Always local | — |
+| ⑤ Train config *(optional)* | Generate ai-toolkit / musubi-tuner config for your dataset | — |
 
 ## Quick start
 
@@ -67,13 +69,23 @@ restoration models, SAM3 checkpoint) and how the bundled workflow templates find
    for held props like microphones), and everything is sized to the target resolution.
 2. **② Generate & curate** — review/edit the curated shot plan (9 angles, 8 poses,
    7 emotion close-ups; each row combines a unique setting/lighting so the dataset isn't
-   skewed toward a single standing pose). Pick the engine, generate. Uncheck rejects;
+   skewed toward a single standing pose). An **outfit** column varies wardrobe without
+   breaking identity (leave blank to keep the reference's clothing), and you can **save/load
+   plans** as reusable prompt libraries. Pick the engine, generate. Uncheck rejects;
+   blurry shots are flagged (`⚠ blurry`) so they're easy to drop.
 3. **③ Caption** — point at **any** folder (not just pipeline output), select images,
    pick a captioner, and write `.txt` sidecars. 🧪 tests one caption first so you can
    compare captioners cheaply. Each captioner uses a prompt tuned to that model
    (JoyCaption's documented instruction convention, explicitness for the NSFW finetune, …).
+   An **inline editor** lets you tweak any caption by hand and save it back.
 4. **④ Export** — list one or more captioned folders (e.g. prepped sources + kept shots);
    get a flat `NN.png` + `NN.txt` dataset folder with `metadata.json` and `README.txt`.
+5. **⑤ Train (configs, optional)** — pick a trainer (**ai-toolkit** or **musubi-tuner**)
+   and model, tune rank/alpha/steps/lr/resolution, and generate a training config written
+   into the dataset folder plus the exact run command. Your trainer install path is saved
+   for next time. ai-toolkit is genuinely one-command (`python run.py config.yaml`); musubi
+   needs you to fill in your local model paths. **Nothing is launched from the app** — the
+   config and command are generated for you to run in the trainer's own environment.
 
 ## Using the CLI
 
