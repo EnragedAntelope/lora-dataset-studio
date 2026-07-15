@@ -342,6 +342,40 @@ def apply_wardrobe(shot: Shot) -> Shot:
     return shot.model_copy(update={"local_prompt": local, "cloud_prompt": cloud})
 
 
+# Props carried in a reference image get copied into every generated shot, and a
+# dataset where 20/24 images show the same backpack teaches the LoRA that the
+# backpack IS the character. These clauses ask the generator to drop them.
+#
+# Deliberately NOT applied to `kind="angle"` local prompts: those use the <sks>
+# Multiple-Angles LoRA grammar, which is trained on clean splat renders and
+# degrades when prose is appended (see ARCHITECTURE.md). Diffusion models also
+# handle negation poorly in a positive prompt — naming "backpack" can summon one.
+# Angle shots rely on isolation instead, which removes props from the reference
+# itself and is the mechanism that actually works.
+_CLOUD_NO_PROPS = (
+    " Show only the character and the clothing worn on their body — do not "
+    "include any backpacks, bags, straps, held objects, tools, props, or "
+    "accessories that appear in the reference image."
+)
+_LOCAL_NO_PROPS = ", without any bags or carried accessories"
+
+
+def apply_prop_exclusion(shot: Shot) -> Shot:
+    """Return a copy of `shot` asking the generator to omit reference props.
+
+    Applied at generation time (like `apply_wardrobe`) rather than baked into the
+    plan, so the column stays honest and hand-edited prompt cells still get the
+    clause. Idempotent.
+    """
+    cloud = shot.cloud_prompt
+    if _CLOUD_NO_PROPS.strip() not in cloud:
+        cloud = f"{cloud}{_CLOUD_NO_PROPS}"
+    local = shot.local_prompt
+    if shot.kind != "angle" and _LOCAL_NO_PROPS not in local:
+        local = f"{local}{_LOCAL_NO_PROPS}"
+    return shot.model_copy(update={"local_prompt": local, "cloud_prompt": cloud})
+
+
 def default_plan(subject: str = "the character") -> list[Shot]:
     """Return the curated 24-shot default plan."""
     shots: list[Shot] = []

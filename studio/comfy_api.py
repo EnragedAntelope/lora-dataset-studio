@@ -97,18 +97,27 @@ def queue_backlog() -> int:
         return 0
 
 
-def run_prompt(graph: dict, timeout: float = 600.0) -> list[dict]:
-    """Queue an API-format graph, wait for completion, return output image refs."""
+def run_prompt(graph: dict, timeout: float = 600.0, front: bool = False) -> list[dict]:
+    """Queue an API-format graph, wait for completion, return output image refs.
+
+    `front=True` asks ComfyUI to put this job at the head of the pending queue
+    (its /prompt endpoint negates the job's priority number). It does NOT
+    interrupt whatever is already running, so the caller still waits out the
+    in-flight job. Polling is by our own prompt_id either way, so other people's
+    jobs are never mistaken for ours.
+    """
     backlog = queue_backlog()
-    if backlog > 10:
+    if backlog > 10 and not front:
         raise ComfyError(
             f"ComfyUI queue is busy: {backlog} jobs already pending. This app's jobs "
-            f"would wait behind them. Open ComfyUI ({settings.comfy_url}) and clear the "
-            f"queue (Queue panel → Clear, or the Manager's 'Clear Queue'), or let it "
-            f"finish, then retry. To generate without ComfyUI, switch the engine to the "
-            f"Cloud (Gemini) option, or set the isolation/restore backend to Built-in/Basic."
+            f"would wait behind them. Either enable 'Prioritize this app's ComfyUI jobs' "
+            f"to jump the pending queue, or open ComfyUI ({settings.comfy_url}) and clear "
+            f"it (Queue panel → Clear, or the Manager's 'Clear Queue'), then retry. To "
+            f"generate without ComfyUI, switch the engine to the Cloud (Gemini) option, "
+            f"or set the isolation/restore backend to Built-in/Basic."
         )
-    r = httpx.post(f"{settings.comfy_url}/prompt", json={"prompt": graph}, timeout=30)
+    r = httpx.post(f"{settings.comfy_url}/prompt",
+                   json={"prompt": graph, "front": front}, timeout=30)
     if r.status_code != 200:
         raise ComfyError(f"queue rejected: {r.text[:500]}")
     prompt_id = r.json()["prompt_id"]

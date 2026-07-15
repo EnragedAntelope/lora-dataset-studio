@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from PIL import Image
@@ -84,6 +85,7 @@ def preprocess(
     exclude_prompt: str = "",
     restore_backend: str = "",
     isolation_backend: str = "",
+    progress: Callable[[str], None] | None = None,
 ) -> PreprocessReport:
     """Copy + clean one source image into `work_dir` at target resolution.
 
@@ -119,7 +121,7 @@ def preprocess(
 
     if isolate:
         isolate_subject(stage_path, out_path, subject_prompt, exclude_prompt,
-                        backend=isolation_backend)
+                        backend=isolation_backend, progress=progress)
         stage_path = out_path
 
     img = Image.open(stage_path).convert("RGB")

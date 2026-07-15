@@ -15,6 +15,10 @@ ComfyUI portable). A recent build is required — the SAM3 nodes (`SAM3_Detect`)
 part of ComfyUI core in current releases. Start it on the default port; if yours
 differs, set `LDS_COMFY_URL` in `.env`.
 
+**No custom nodes are needed.** Every bundled workflow uses only core ComfyUI nodes.
+If a workflow reports a missing node, you're on a build too old for core SAM3 — update
+ComfyUI rather than installing a node pack.
+
 ## 2. Download models
 
 Place these in your ComfyUI `models/` tree (filenames are configurable in `.env`
@@ -50,7 +54,9 @@ Workflows used:
 Things to know:
 
 - If ComfyUI's queue already has more than 10 pending jobs, the app fails fast rather
-  than queueing behind them.
+  than queueing behind them. Tick **"Prioritize this app's ComfyUI jobs"** on ② to jump
+  the pending queue instead. This does **not** interrupt a job already running, so you
+  still wait out the one in flight.
 - Before local captioning, the app asks ComfyUI to free VRAM (`/free`) so the ~17 GB
   captioner fits.
 - ComfyUI caches its model file lists — restart it after adding new model files if a

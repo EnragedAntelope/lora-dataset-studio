@@ -17,7 +17,7 @@ from studio.config import settings
 from studio.engines.base import GenerationError
 from studio.package import slugify
 from studio.preprocess import PreprocessReport, preprocess
-from studio.shotplan import Shot, apply_wardrobe
+from studio.shotplan import Shot, apply_prop_exclusion, apply_wardrobe
 
 ProgressFn = Callable[[str], None]
 
@@ -65,7 +65,7 @@ def preprocess_sources(
         rep = preprocess(src, out_dir, target=target, force_restore=force_restore,
                          isolate=isolate, subject_prompt=subject_prompt,
                          exclude_prompt=exclude_prompt, restore_backend=restore_backend,
-                         isolation_backend=isolation_backend)
+                         isolation_backend=isolation_backend, progress=progress)
         extra = ", subject isolated" if rep.isolated else ""
         progress(
             f"  {src.name}: {rep.original_size[0]}x{rep.original_size[1]} -> "
@@ -87,12 +87,17 @@ def generate_shots(
     isolation_backend: str = "",
     existing: list[GenResult] | None = None,
     only_ids: set[str] | None = None,
+    exclude_props: bool = True,
+    front: bool = False,
     progress: ProgressFn = print,
 ) -> list[GenResult]:
     """Generate one image per shot from `sources` (identity references).
 
     `existing` + `only_ids` support regeneration: previous results for shots
     in only_ids are dropped and redone; everything else is kept.
+
+    `exclude_props` asks the generator to omit bags/held objects carried in the
+    reference, so they don't end up baked into every dataset image.
     """
     if not sources:
         raise GenerationError("No reference images given — nothing to generate from.")
@@ -107,6 +112,8 @@ def generate_shots(
     done: dict[str, Path] = {r.shot.id: r.path for r in results if r.path}
     for i, shot in enumerate(todo, 1):
         shot = apply_wardrobe(shot)  # fold the outfit column into the prompts
+        if exclude_props:
+            shot = apply_prop_exclusion(shot)
         seed = random.randint(0, 2**48)
         out = out_dir / f"{shot.id}.png"
         shot_sources = sources
@@ -124,7 +131,8 @@ def generate_shots(
                     from studio.isolate import isolate_subject
 
                     isolate_subject(out, out, subject_prompt, exclude_prompt,
-                                    backend=isolation_backend)
+                                    backend=isolation_backend, progress=progress,
+                                    front=front)
                 except Exception as e:
                     progress(f"  (isolation skipped: {e})")
             results.append(GenResult(shot, out, seed))

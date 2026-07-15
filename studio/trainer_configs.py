@@ -96,11 +96,21 @@ class TrainConfig(BaseModel):
     steps: int = 2000
     lr: float = 1e-4
     batch_size: int = 1
+    # Multi-resolution buckets. Empty = single-bucket at `resolution` (the old
+    # behaviour); populated from the dataset's real dimensions by the caller.
+    buckets: list[int] = []
 
 
 def _sample_prompt(cfg: TrainConfig) -> str:
     who = cfg.trigger or cfg.name or "the character"
     return f"a photo of {who}, standing outdoors in daylight"
+
+
+def _resolution_list(cfg: TrainConfig) -> str:
+    """ai-toolkit buckets by listing resolutions; a single entry means one
+    bucket and wastes non-square images."""
+    values = cfg.buckets or [cfg.resolution]
+    return "[" + ", ".join(str(v) for v in values) + "]"
 
 
 def render_aitoolkit_yaml(cfg: TrainConfig) -> str:
@@ -133,7 +143,7 @@ def render_aitoolkit_yaml(cfg: TrainConfig) -> str:
         "          caption_dropout_rate: 0.05\n"
         "          shuffle_tokens: false\n"
         "          cache_latents_to_disk: true\n"
-        f"          resolution: [{cfg.resolution}]\n"
+        f"          resolution: {_resolution_list(cfg)}\n"
         "      train:\n"
         f"        batch_size: {cfg.batch_size}\n"
         f"        steps: {cfg.steps}\n"
@@ -163,7 +173,7 @@ def render_aitoolkit_yaml(cfg: TrainConfig) -> str:
     )
 
 
-def render_musubi_toml(cfg: TrainConfig) -> str:
+def render_musubi_toml(cfg: TrainConfig, num_repeats: int = 1) -> str:
     """The standard musubi-tuner image dataset.toml."""
     cache = (cfg.dataset_dir / "cache").as_posix()
     return (
@@ -176,12 +186,13 @@ def render_musubi_toml(cfg: TrainConfig) -> str:
         'caption_extension = ".txt"\n'
         f"batch_size = {cfg.batch_size}\n"
         "enable_bucket = true\n"
-        "bucket_no_upscale = false\n"
+        # Never invent detail by upscaling a small source into a big bucket.
+        "bucket_no_upscale = true\n"
         "\n"
         "[[datasets]]\n"
         f'image_directory = "{cfg.dataset_dir.as_posix()}"\n'
         f'cache_directory = "{cache}"\n'
-        "num_repeats = 1\n"
+        f"num_repeats = {num_repeats}\n"
     )
 
 
@@ -190,18 +201,25 @@ def aitoolkit_command(install_path: str, config_path: Path) -> str:
     return f'cd "{base}" && python run.py "{config_path.as_posix()}"'
 
 
-def musubi_command(install_path: str, toml_path: Path, model: ModelPreset) -> str:
+def musubi_command(install_path: str, toml_path: Path, cfg: TrainConfig) -> str:
+    """Build the musubi run command from `cfg`.
+
+    Takes the whole TrainConfig, not just the preset: rank/alpha/steps/lr are
+    user-tunable in the UI and must actually reach the command line.
+    """
     base = install_path.strip() or "<<FILL: path to your musubi-tuner install>>"
     return (
-        f'cd "{base}" && accelerate launch src/musubi_tuner/{model.musubi_script} \\\n'
+        f'cd "{base}" && accelerate launch src/musubi_tuner/{cfg.model.musubi_script} \\\n'
         f'  --dataset_config "{toml_path.as_posix()}" \\\n'
         "  --dit <<FILL: DiT/model weights path>> \\\n"
         "  --vae <<FILL: VAE path>> \\\n"
         "  --text_encoder <<FILL: text encoder path>> \\\n"
         "  --network_module networks.lora \\\n"
-        f"  --network_dim {16} \\\n"
-        "  --output_dir output --output_name lora \\\n"
-        "  --max_train_steps 2000 --mixed_precision bf16\n"
+        f"  --network_dim {cfg.rank} \\\n"
+        f"  --network_alpha {cfg.alpha} \\\n"
+        f"  --learning_rate {cfg.lr} \\\n"
+        f'  --output_dir output --output_name "{cfg.name}" \\\n'
+        f"  --max_train_steps {cfg.steps} --mixed_precision bf16\n"
         "# Consult the musubi-tuner arch-specific doc for the exact required flags."
     )
 
@@ -217,7 +235,8 @@ def _nonclobber(path: Path) -> Path:
         n += 1
 
 
-def write_configs(cfg: TrainConfig, install_path: str = "") -> tuple[list[Path], str]:
+def write_configs(cfg: TrainConfig, install_path: str = "",
+                  num_repeats: int = 1) -> tuple[list[Path], str]:
     """Write the trainer's config file(s) into the dataset folder.
 
     Returns (written_paths, run_command). Never clobbers existing files —
@@ -233,9 +252,10 @@ def write_configs(cfg: TrainConfig, install_path: str = "") -> tuple[list[Path],
         command = aitoolkit_command(install_path, path)
     elif cfg.trainer == "musubi":
         path = _nonclobber(cfg.dataset_dir / "dataset.toml")
-        path.write_text(render_musubi_toml(cfg), encoding="utf-8")
+        path.write_text(render_musubi_toml(cfg, num_repeats=num_repeats),
+                        encoding="utf-8")
         written.append(path)
-        command = musubi_command(install_path, path, cfg.model)
+        command = musubi_command(install_path, path, cfg)
     else:
         raise ValueError(f"Unknown trainer: {cfg.trainer}")
     return written, command

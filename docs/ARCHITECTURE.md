@@ -1,6 +1,6 @@
 # Architecture
 
-Version: 0.3.1
+Version: 0.4.0
 
 ```
 app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)
@@ -19,8 +19,12 @@ studio/
   package.py            Dataset export (NN.png/NN.txt + metadata.json + README.txt)
   shotplan.py           Default shot plan (curated 24 shots: angles, poses, emotions,
                         settings + outfit merged into each shot) + Shot model +
-                        apply_wardrobe() outfit injection
+                        apply_wardrobe() outfit injection + apply_prop_exclusion()
+  wardrobe.py           Compositional unisex outfit pool for the outfit column
+                        (colour x garment; one pool, no gender picker)
   plan_io.py            Save/load shot plans as YAML (user-editable prompt libraries)
+  dataset_stats.py      Inspect a dataset folder (count/sizes/aspects) -> suggested
+                        steps + bucket ladder, so ⑤'s numbers are derived not guessed
   trainer_configs.py    Emit LoRA-trainer configs (ai-toolkit config.yaml / musubi
                         dataset.toml) + run-command builders + model registry
   user_config.py        Persist trainer install paths, last training settings, and the
@@ -70,9 +74,30 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
   plan chains them (`chain_from`) off a generated side view; chained shots always run
   last, and the chained image is passed *first* so single-reference engines rotate
   stepwise.
-- **SAM3 merges held props into the subject segment.** An "exclude" prompt runs a second
-  segmentation, dilates it slightly (edge halos), and subtracts it. Inverting the subject
-  mask does *not* work for this.
+- **SAM3 usually does NOT merge props into the subject segment** — and the exclusion
+  step must not assume it does. Measured on a reference image (character with a backpack
+  and a belt radio): only **3% of prop pixels** fell inside the `character` mask. Because
+  `isolate_builtin` composites with `np.where(subject, image, white)`, everything outside
+  the subject mask is *already* white, so a prop SAM3 excluded is gone whether or not it
+  is subtracted. Subtracting it can therefore only remove genuine subject pixels.
+  `isolate_builtin` measures the subject/prop overlap and, below
+  `_MERGED_PROP_OVERLAP`, reports the exclusion as a no-op instead of carving. The
+  feature still earns its place for genuinely merged props (a microphone gripped in a
+  hand), which is the case it was built for.
+  *(Prior versions of this file asserted the opposite; that belief produced the bug.)*
+- **Never dilate the exclusion mask by default.** Growing it cannot remove out-of-subject
+  halos (they are already white) — it can only eat the subject. At the old
+  `max(2, long_side // 200)` (7px on a 1480px image) it destroyed **2.75% of the
+  character**, versus 0.39% for a raw subtract and 0% for no exclusion at all.
+  `LDS_EXCLUDE_DILATE_PX` defaults to 0 and exists only for the merged-prop case.
+- **SAM3 scores a text prompt as ONE concept.** `"backpack, walkie talkie"` asks for a
+  single object that is both, and found *less* than `"backpack"` alone (40,942 px vs
+  42,712 px); segmenting each term and unioning found 60,084 px (1.47x). `split_terms()`
+  splits on commas and `_segment_terms()` unions per-term masks. The ComfyUI graph has one
+  text encoder, so it joins terms with `" or "` as the closest equivalent.
+- **Occlusion holes cannot be masked away.** Where a prop physically covers the body, the
+  subject mask has a real hole and the composite renders it white. Only inpainting fixes
+  that; no amount of threshold/dilation tuning will.
 - **The Multiple-Angles LoRA is trained on clean splat renders** — isolating the subject
   onto white dramatically improves its output, especially direct back views. The LoRA is
   trigger-based (`<sks>` grammar), so its strength is 0.9 for `kind="angle"` shots and
@@ -80,7 +105,19 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
 - **VRAM choreography:** before loading a ~17 GB local captioner, the pipeline asks
   ComfyUI to `/free` its models (best effort) and unloads the in-process SAM3.
 - **ComfyUI queue guard:** if ComfyUI already has >10 pending jobs, the client fails
-  fast instead of silently queueing behind them.
+  fast instead of silently queueing behind them — unless `front=True`, which asks
+  ComfyUI to put the job at the head of the pending queue (`/prompt` accepts `front`
+  and negates the job's priority number). `front` does **not** interrupt the job already
+  running, so the UI must not promise "immediate". Polling is always by our own
+  `prompt_id`, so another client's jobs are never mistaken for ours.
+- **The bundled workflows use ONLY core nodes.** `isolate_*.json` previously needed
+  `MaskPreview+` from the third-party `ComfyUI_essentials` pack — used purely as a hack to
+  render a white backdrop — which silently broke the workflows for anyone who didn't
+  happen to have that pack. Replaced with core `EmptyImage` + `GetImageSize`.
+  `EmptyImage` **must** be sized from the source via `GetImageSize`: hardcoding 1024²
+  breaks `ImageCompositeMasked` (`resize_source: false` requires matching dimensions).
+  `SAM3_Detect` *is* core (`comfy_extras/nodes_sam3.py`). Keep it this way — a
+  third-party node in a bundled workflow is a silent portability failure.
 - **Gemini refusals return no image part** — that's detected and reported as a refusal;
   retries don't help, so only transient errors are retried.
 - **Shot plan is a curated list, not a cartesian product.** Each of the 24 default
@@ -112,6 +149,19 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
 - **Model filenames are configuration.** The bundled workflow JSONs are patched at load
   time from settings (`LDS_QWEN_EDIT_MODEL` etc.), so users don't edit JSON to match
   their filenames.
+- **Trainer configs are derived from the dataset, not from constants.**
+  `dataset_stats.inspect()` reads image count/dimensions (Pillow header parse only) so
+  steps scale with the set (`STEPS_PER_IMAGE`, clamped to 1000–4000) and buckets come
+  from the images that actually exist. Only config keys attested in each trainer's own
+  examples are emitted — inventing plausible-looking keys produces configs that fail
+  hours into a run.
+- **`musubi_command()` takes the whole `TrainConfig`, not just the `ModelPreset`.** It
+  previously took the preset alone and hardcoded `--network_dim 16` /
+  `--max_train_steps 2000`, so every ⑤-tab slider was silently discarded (it even emitted
+  the literal `{16}` from a broken f-string). Regression-tested in
+  `tests/test_trainer_configs_0_4_0.py`.
+- **Emitted configs are verified by unit tests on the rendered text, never by a live
+  training run.** The ⑤ tab says so. Don't imply otherwise.
 - **ai-toolkit configs are one-command; musubi configs are not.** `trainer_configs.py`
   emits a fully runnable ai-toolkit `config.yaml` (model is a HF id, all hyperparameters
   inline → `python run.py config.yaml`). musubi's `dataset.toml` is complete, but its
@@ -148,7 +198,22 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
 
 ## Roadmap / deferred
 
-Relocated here from `shotplan.py`. Done this revision (0.3.0):
+Done this revision (0.4.0):
+
+- ✅ **Isolation over-cutting fixed** — comma-split exclusion terms, dilation off by
+  default, no-op detection + reporting. Verified against a reference image: output is now
+  byte-identical to the subject-only baseline (0 character pixels lost, was 6,594).
+- ✅ **Bundled ComfyUI workflows are core-only** — no `ComfyUI_essentials` needed.
+- ✅ **ComfyUI queue priority** (`front=True`) + relaxed backlog guard.
+- ✅ **Wardrobe randomizer** (`wardrobe.py`) — one unisex pool, angle/pose shots only.
+- ✅ **Prop-exclusion clause** on generation prompts (`apply_prop_exclusion`).
+- ✅ **`exclude_prompt` wired into ②** — the pipeline accepted it but the UI never passed it.
+- ✅ **Caption-tab cost estimate** (per-model, scales with selection).
+- ✅ **③ → ④ folder list accumulates** instead of overwriting.
+- ✅ **musubi honors every hyperparameter**; steps derived from image count; multi-res buckets.
+- ✅ **CLI/UI parity** for the custom captioner endpoint (`resolve_captioner_config`).
+
+Done in 0.3.0:
 
 - ✅ musubi-tuner `dataset.toml` + ostris ai-toolkit `config.yaml` generators (⑤ Train tab).
 - ✅ Outfit/wardrobe control (per-shot `outfit`, folded into prompts without identity drift).
@@ -157,6 +222,12 @@ Relocated here from `shotplan.py`. Done this revision (0.3.0):
 - ✅ User-editable prompt libraries — save/load shot plans as YAML.
 
 Deferred (with rationale):
+
+- **Inpainting occluded regions** (where a prop physically covers the body, isolation
+  leaves a real hole): the honest fix, but it needs a generative edit pass per source.
+  The app has the machinery (Qwen-Image-Edit) — revisit if the white notch bites users.
+- **Live cloud pricing**: Google publishes no pricing API; only scraping the pricing page
+  could beat the build-time table, and it would break silently. Estimates are labelled.
 
 - **In-GUI training launch** (subprocess + streamed logs): configs + saved paths + the run
   command cover the workflow; launching is fragile across trainer venvs/CUDA setups, so it

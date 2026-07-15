@@ -164,6 +164,20 @@ CLOUD_IMAGE_PRICES = {
     "gemini-2.5-flash-image": 0.039,  # Nano Banana (1K)
 }
 
+# Known Gemini caption models -> USD per captioned image. ESTIMATES captured at
+# build time, derived from published token pricing: ~1290 tokens for a 1K image
+# in, ~120 tokens of caption out. Actual costs are billed by Google to the
+# user's own key — always check current pricing.
+CAPTION_IMAGE_PRICES = {
+    "gemini-flash-latest": 0.0007,
+    "gemini-2.5-flash": 0.0007,
+    "gemini-flash-lite-latest": 0.0002,
+    "gemini-2.5-flash-lite": 0.0002,
+}
+# Applied to a Gemini caption model we have no specific price for, so the
+# estimate degrades to "about a Flash" rather than silently reporting $0.
+DEFAULT_CAPTION_PRICE = 0.0007
+
 # Local cache for the live Gemini model list so the dropdown can be populated
 # without an API call on every UI load. 24-hour TTL; falls back to stale cache,
 # then to CLOUD_IMAGE_PRICES if the API is unreachable.
@@ -237,6 +251,12 @@ class Settings(BaseSettings):
     # "builtin" = SAM3 via transformers in-process; "comfyui" = SAM3 workflow
     isolation_backend: str = "builtin"
     sam3_hf_id: str = "facebook/sam3"  # gated: accept license + `hf auth login`
+    # Pixels to grow the exclusion mask by before subtracting it from the
+    # subject. 0 on purpose: anything outside the subject mask is already
+    # whited out, so growing the exclusion can only eat the subject (measured:
+    # 7px destroyed 2.75% of the reference character for no gain). Raise only
+    # for a prop genuinely merged into the subject segment.
+    exclude_dilate_px: int = 0
     # "auto" = model restore through ComfyUI when reachable, else basic Lanczos;
     # "comfyui" = require ComfyUI; "basic" = never call ComfyUI
     restore_backend: str = "auto"

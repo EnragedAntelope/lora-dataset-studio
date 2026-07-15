@@ -24,9 +24,71 @@ from typing import Callable
 import httpx
 from PIL import Image
 
-from studio.config import CAPTIONERS_BY_KEY, CaptionerSpec, settings
+from studio.config import (
+    CAPTION_IMAGE_PRICES,
+    CAPTIONERS_BY_KEY,
+    DEFAULT_CAPTION_PRICE,
+    CaptionerSpec,
+    settings,
+)
 
 _JOYCAPTION_SYSTEM = "You are a helpful image captioner."
+
+
+class CaptionerConfigError(Exception):
+    """A captioner is selected but not usable yet (e.g. custom endpoint unset).
+
+    Plain exception rather than gr.Error so the CLI can use the same resolver;
+    the UI translates it at the boundary.
+    """
+
+
+def resolve_captioner_config(captioner_key: str, gemini_model: str = "") -> tuple[str, dict | None]:
+    """Return (model_override, spec_overrides) for the chosen captioner.
+
+    Shared by the UI and CLI so the custom endpoint behaves identically in both.
+
+    - Gemini captioner: the caller's model choice wins.
+    - Custom endpoint: pull the saved base URL / model / key-env / spacing.
+    - Everything else: the captioner's built-in config, unchanged.
+    """
+    spec = CAPTIONERS_BY_KEY[captioner_key]
+    if captioner_key == "custom":
+        from studio import user_config
+
+        cfg = user_config.get_custom_captioner()
+        if not cfg.get("base_url"):
+            raise CaptionerConfigError(
+                "The custom endpoint isn't configured yet. In the UI: open 'Custom "
+                "endpoint settings' on the ③ Caption tab, enter a base URL (e.g. "
+                "https://openrouter.ai/api/v1) and model, then click 💾 Save endpoint. "
+                "It is saved on this machine and reused by the CLI."
+            )
+        return cfg.get("model", ""), {
+            "base_url": cfg["base_url"],
+            "api_key_env": cfg.get("api_key_env", ""),
+            "min_interval_s": cfg.get("min_interval_s", 0.0),
+        }
+    if spec.backend == "gemini":
+        return gemini_model.strip(), None
+    return "", None
+
+
+def estimate_caption_cost(captioner_key: str, gemini_model: str, n_images: int) -> str:
+    """Markdown cost line for captioning `n_images` with this captioner."""
+    spec = CAPTIONERS_BY_KEY[captioner_key]
+    if spec.backend != "gemini":
+        return f"**Cost:** {spec.cost_note}"
+    model = (gemini_model or spec.model).strip()
+    price = CAPTION_IMAGE_PRICES.get(model, DEFAULT_CAPTION_PRICE)
+    known = model in CAPTION_IMAGE_PRICES
+    if not n_images:
+        return (f"**Cost:** ~${price:.4f}/image on `{model}` — select images for a total "
+                f"(billed by Google to your own API key)")
+    approx = "" if known else " (unlisted model — priced as Flash)"
+    return (f"**Cost:** ~${n_images * price:.2f} for {n_images} image(s) on `{model}`"
+            f"{approx} — build-time estimate, billed by Google to your own API key. "
+            f"[Check current pricing](https://ai.google.dev/pricing)")
 
 
 class Captioner:

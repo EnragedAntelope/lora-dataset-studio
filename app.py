@@ -20,7 +20,15 @@ import pandas as pd
 
 from studio import pipeline
 from studio import user_config as _uc_boot
-from studio.captioner import SUBJECT_ALIASES, Captioner, caption_images, finalize_caption
+from studio.captioner import (
+    SUBJECT_ALIASES,
+    Captioner,
+    CaptionerConfigError,
+    caption_images,
+    estimate_caption_cost,
+    finalize_caption,
+    resolve_captioner_config,
+)
 from studio.config import (
     CAPTIONERS,
     CAPTIONERS_BY_KEY,
@@ -115,9 +123,51 @@ def _allowed_media_paths() -> list[str]:
     return sorted(paths)
 
 
+# Human-editable columns lead; the long prompt cells trail. Column ORDER and
+# WIDTHS must be set explicitly: pydantic field order otherwise puts the two
+# ~200-char prompts in the middle, squeezing `outfit` to an unreadable sliver.
+PLAN_COLUMNS = ["id", "kind", "emotion", "setting", "outfit",
+                "local_prompt", "cloud_prompt", "chain_from"]
+PLAN_COLUMN_WIDTHS = ["110px", "70px", "110px", "200px", "220px",
+                      "260px", "260px", "100px"]
+
+
+def _shots_to_df(shots: list[Shot]) -> pd.DataFrame:
+    """Single place that builds the plan table, so column order can't drift
+    between the default plan and a loaded one."""
+    return pd.DataFrame([s.model_dump() for s in shots], columns=PLAN_COLUMNS)
+
+
 def _plan_df(subject: str) -> pd.DataFrame:
-    shots = default_plan(subject=subject or "the character")
-    return pd.DataFrame([s.model_dump() for s in shots])
+    return _shots_to_df(default_plan(subject=subject or "the character"))
+
+
+def randomize_outfits(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """Fill the outfit column with distinct random unisex outfits.
+
+    Close-ups are skipped: they frame the face and upper shoulders, so a full
+    outfit description there tends to widen the shot instead of dressing it.
+    """
+    from studio.wardrobe import OUTFIT_SHOT_KINDS, random_outfits
+
+    df = df.copy()
+    targets = [i for i, row in df.iterrows()
+               if str(row.get("kind", "")) in OUTFIT_SHOT_KINDS]
+    if not targets:
+        raise gr.Error("No angle/pose rows to dress — outfits are skipped for "
+                       "close-ups, where clothing is barely in frame.")
+    outfits = random_outfits(len(targets))
+    for i, outfit in zip(targets, outfits):
+        df.at[i, "outfit"] = outfit
+    return df, (f"🎲 Dressed {len(targets)} angle/pose shots in distinct outfits "
+                f"({len(df) - len(targets)} close-ups left blank). Click again to "
+                f"reroll, or clear the column to go back to the reference's clothing.")
+
+
+def clear_outfits(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    df = df.copy()
+    df["outfit"] = ""
+    return df, "Outfit column cleared — every shot keeps the reference's clothing."
 
 
 def _df_to_shots(df: pd.DataFrame) -> list[Shot]:
@@ -176,8 +226,9 @@ def do_preprocess(files: list[str], folder: str, target: int, restore_mode: str,
 # ---------- ② generate & curate ----------
 
 def do_generate(files: list[str], folder: str, plan_df: pd.DataFrame, engine: str,
-                cloud_model: str, isolate_angles: bool, isolation_backend: str,
-                subject_prompt: str, gen_dir_prev: str, results_state,
+                cloud_model: str, exclude_props: bool, isolate_angles: bool,
+                isolation_backend: str, subject_prompt: str, exclude_prompt: str,
+                front: bool, gen_dir_prev: str, results_state,
                 progress=gr.Progress()):
     sources = _inputs(files, folder)
     out_dir = _validate_out_dir(gen_dir_prev) if gen_dir_prev.strip() else _stamped("generated")
@@ -192,7 +243,8 @@ def do_generate(files: list[str], folder: str, plan_df: pd.DataFrame, engine: st
         results = pipeline.generate_shots(
             sources, shots, engine, out_dir, cloud_model=cloud_model,
             isolate_angles=isolate_angles, subject_prompt=subject_prompt or "character",
-            isolation_backend=isolation_backend, progress=report)
+            exclude_prompt=exclude_prompt, isolation_backend=isolation_backend,
+            exclude_props=exclude_props, front=front, progress=report)
     except OSError as e:
         raise gr.Error(f"Couldn't write to '{out_dir}': {e}. Check the output folder "
                        f"path (valid drive, no forbidden characters, writable).")
@@ -203,8 +255,9 @@ def do_generate(files: list[str], folder: str, plan_df: pd.DataFrame, engine: st
 
 
 def do_regenerate(files: list[str], folder: str, plan_df: pd.DataFrame, engine: str,
-                  cloud_model: str, isolate_angles: bool, isolation_backend: str,
-                  subject_prompt: str, gen_dir: str, results_state, keep_ids: list[str],
+                  cloud_model: str, exclude_props: bool, isolate_angles: bool,
+                  isolation_backend: str, subject_prompt: str, exclude_prompt: str,
+                  front: bool, gen_dir: str, results_state, keep_ids: list[str],
                   progress=gr.Progress()):
     if not results_state:
         raise gr.Error("Nothing generated yet.")
@@ -217,7 +270,8 @@ def do_regenerate(files: list[str], folder: str, plan_df: pd.DataFrame, engine: 
     results = pipeline.generate_shots(
         sources, _df_to_shots(plan_df), engine, Path(gen_dir), cloud_model=cloud_model,
         isolate_angles=isolate_angles, subject_prompt=subject_prompt or "character",
-        isolation_backend=isolation_backend, existing=results_state, only_ids=redo,
+        exclude_prompt=exclude_prompt, isolation_backend=isolation_backend,
+        exclude_props=exclude_props, front=front, existing=results_state, only_ids=redo,
         progress=log.append)
     gallery, keep = _gen_gallery(results)
     return results, gallery, keep, "\n".join(log)
@@ -266,32 +320,12 @@ def load_caption_folder(folder: str):
 
 
 def _resolve_captioner_config(captioner_key: str, gemini_model: str):
-    """Return (model_override, spec_overrides) for the chosen captioner.
-
-    - Gemini captioner: the model dropdown chooses the model.
-    - Custom endpoint: pull the saved base URL / model / key-env / spacing.
-    - Everything else: use the captioner's built-in config unchanged.
-    """
-    spec = CAPTIONERS_BY_KEY[captioner_key]
-    if captioner_key == "custom":
-        from studio import user_config
-
-        cfg = user_config.get_custom_captioner()
-        if not cfg.get("base_url"):
-            raise gr.Error(
-                "Configure the custom endpoint first — open 'Custom endpoint settings', "
-                "enter a base URL (e.g. https://openrouter.ai/api/v1) and model, then "
-                "click 💾 Save endpoint."
-            )
-        overrides = {
-            "base_url": cfg["base_url"],
-            "api_key_env": cfg.get("api_key_env", ""),
-            "min_interval_s": cfg.get("min_interval_s", 0.0),
-        }
-        return cfg.get("model", ""), overrides
-    if spec.backend == "gemini":
-        return gemini_model.strip(), None
-    return "", None
+    """UI wrapper over the shared resolver — translates its error into gr.Error
+    so the same logic serves the CLI without importing gradio."""
+    try:
+        return resolve_captioner_config(captioner_key, gemini_model)
+    except CaptionerConfigError as e:
+        raise gr.Error(str(e))
 
 
 def save_custom_captioner(base_url: str, model: str, api_key_env: str,
@@ -346,8 +380,22 @@ def _editor_choices(folder: str):
     return gr.Dropdown(choices=names, value=names[0] if names else None)
 
 
+def _merge_export_folders(existing: str, new_folder: str) -> str:
+    """Add `new_folder` to ④ Export's folder list, keeping what's already there.
+
+    Captioning the prepped sources and then the generated shots is the documented
+    workflow, so this must accumulate — overwriting silently dropped the first
+    folder from the export.
+    """
+    folders = [ln.strip() for ln in (existing or "").splitlines() if ln.strip()]
+    if new_folder not in folders:
+        folders.append(new_folder)
+    return "\n".join(folders)
+
+
 def do_caption(folder: str, selected: list[str], captioner_key: str,
-               name: str, trigger: str, gemini_model: str, progress=gr.Progress()):
+               name: str, trigger: str, gemini_model: str, exp_folders_prev: str,
+               exp_name_prev: str, exp_trigger_prev: str, progress=gr.Progress()):
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select the images to caption first.")
     base = Path(folder.strip())
@@ -368,8 +416,12 @@ def do_caption(folder: str, selected: list[str], captioner_key: str,
         img.with_suffix(".txt").write_text(caption, encoding="utf-8")
     gallery, boxes, note = load_caption_folder(folder)
     result = f"✅ Wrote {len(items)} caption sidecar(s) in {base}"
-    # Last two outputs auto-fill ④ Export's name/trigger so they carry across.
-    return gallery, boxes, result, "\n".join(log), str(base), name, trigger
+    # Auto-fill ④ Export: ADD this folder to its list (captioning several folders
+    # in turn must accumulate), and carry name/trigger without clobbering values
+    # the user already typed there.
+    folders = _merge_export_folders(exp_folders_prev, str(base))
+    return (gallery, boxes, result, "\n".join(log), folders,
+            exp_name_prev or name, exp_trigger_prev or trigger)
 
 
 # ---------- ④ export ----------
@@ -423,6 +475,11 @@ def do_export(folders_text: str, name: str, trigger: str, output_root: str):
 
 # ---------- misc ----------
 
+def _fill_if_empty(current: str, incoming: str) -> str:
+    """Carry a value into the next tab without clobbering a hand-typed one."""
+    return current.strip() or incoming
+
+
 def refresh_plan(name: str) -> pd.DataFrame:
     return _plan_df(f"character {name}" if name else "the character")
 
@@ -450,8 +507,7 @@ def do_load_plan(plan_name: str):
     if not path.exists():
         raise gr.Error(f"No plan file at {path}")
     shots = load_plan(path)
-    return (pd.DataFrame([s.model_dump() for s in shots]),
-            f"✅ Loaded {len(shots)} shots from {path}")
+    return _shots_to_df(shots), f"✅ Loaded {len(shots)} shots from {path}"
 
 
 def estimate_cost(engine: str, cloud_model: str, df: pd.DataFrame) -> str:
@@ -505,9 +561,25 @@ def save_trainer_path(trainer: str, path: str) -> str:
     return f"✅ Saved {trainer} install path: {path.strip() or '(cleared)'}"
 
 
+def inspect_dataset(dataset_dir: str) -> tuple[str, gr.Number]:
+    """Read the dataset and suggest a step count derived from its image count."""
+    from studio.dataset_stats import inspect
+
+    if not dataset_dir.strip():
+        return "", gr.Number()
+    ds = Path(dataset_dir.strip())
+    if not ds.is_dir():
+        return f"⚠️ Folder not found: {ds}", gr.Number()
+    stats = inspect(ds)
+    if not stats.n_images:
+        return f"⚠️ No images in {ds}", gr.Number()
+    return stats.summary(), gr.Number(value=stats.suggested_steps)
+
+
 def do_generate_train_config(trainer: str, model_key: str, dataset_dir: str,
                              install_path: str, name: str, trigger: str,
-                             resolution, rank, alpha, steps, lr, batch_size) -> str:
+                             resolution, rank, alpha, steps, lr, batch_size,
+                             multi_res: bool) -> str:
     if not dataset_dir.strip():
         raise gr.Error("Enter the dataset folder to write the config into "
                        "(④ Export produces one and auto-fills this).")
@@ -515,24 +587,37 @@ def do_generate_train_config(trainer: str, model_key: str, dataset_dir: str,
     if not ds.is_dir():
         raise gr.Error(f"Dataset folder not found: {ds}")
     from studio import user_config
+    from studio.dataset_stats import inspect
     from studio.trainer_configs import TrainConfig, write_configs
 
+    stats = inspect(ds)
+    if not stats.n_images:
+        raise gr.Error(f"No images found in {ds} — export a dataset first (④).")
+    buckets = stats.buckets_for(int(resolution)) if multi_res else []
     cfg = TrainConfig(
         trainer=trainer, model=_preset(trainer, model_key), dataset_dir=ds,
         trigger=trigger.strip(), name=(name.strip() or "lora"),
         resolution=int(resolution), rank=int(rank), alpha=int(alpha),
-        steps=int(steps), lr=float(lr), batch_size=int(batch_size))
-    written, command = write_configs(cfg, install_path.strip())
+        steps=int(steps), lr=float(lr), batch_size=int(batch_size),
+        buckets=buckets)
+    written, command = write_configs(cfg, install_path.strip(),
+                                     num_repeats=max(1, round(400 / stats.n_images)))
     user_config.set_last_train_settings({
         "trainer": trainer, "model": model_key, "resolution": int(resolution),
         "rank": int(rank), "alpha": int(alpha), "steps": int(steps),
         "lr": float(lr), "batch_size": int(batch_size)})
     files = "\n".join(str(p) for p in written)
+    bucket_note = (f"\nBuckets: {buckets} (from the dataset's actual sizes)"
+                   if buckets else f"\nSingle bucket at {int(resolution)}px")
     caveat = ""
     if trainer == "musubi":
         caveat = ("\n\n⚠️ musubi needs your local DiT / VAE / text-encoder paths — "
                   "fill the <<FILL: …>> placeholders in the command before running.")
-    return f"✅ Wrote:\n{files}\n\nRun it with:\n{command}{caveat}"
+    return (f"✅ Wrote:\n{files}\n\nDataset: {stats.n_images} images, "
+            f"{stats.min_long_side}-{stats.max_long_side}px long side{bucket_note}\n\n"
+            f"Run it with:\n{command}{caveat}\n\n"
+            f"⚠️ Configs are generated, not test-trained — verify keys against your "
+            f"trainer's own docs before a long run.")
 
 
 def refresh_cloud_models(force: bool = False):
@@ -651,19 +736,45 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                     refresh_models = gr.Button("🔄 Refresh model list from API")
                     force_refresh_models = gr.Button("🔄 Force refresh model list now")
                     cost = gr.Markdown()
+                    gen_exclude_props = gr.Checkbox(
+                        value=True,
+                        label="Exclude props/accessories from the reference",
+                        info="Asks the generator to drop bags, held objects and "
+                             "accessories carried in your reference, so they don't get "
+                             "baked into every dataset image. Isolating the source in ① "
+                             "is the more reliable fix.")
                     gen_isolate = gr.Checkbox(value=False,
                                               label="Isolate generated angle shots (white background)")
                     gen_iso_backend = gr.Dropdown(ISOLATION_CHOICES,
                                                   value=settings.isolation_backend,
                                                   label="Isolation backend")
                     gen_subject = gr.Textbox(label="Subject prompt for isolation", value="character")
+                    gen_exclude = gr.Textbox(
+                        label="Objects to remove when isolating (auto-filled by ①)",
+                        placeholder="backpack, walkie talkie",
+                        info="One concept per comma — each is segmented separately.")
+                    gen_front = gr.Checkbox(
+                        value=False, label="Prioritize this app's ComfyUI jobs",
+                        info="Puts our jobs at the head of ComfyUI's pending queue. "
+                             "Does not interrupt a job already running.")
                 with gr.Column(scale=2):
+                    # wrap=False on purpose: wrapping the two ~200-char prompt
+                    # cells inflates every row to ~250px, so only two of the 24
+                    # shots are on screen at once. Unwrapped, the plan is
+                    # scannable and the short columns (outfit/emotion) are fully
+                    # readable; click any cell to see or edit its full text.
                     plan = gr.Dataframe(value=_plan_df("the character"), label="Shot plan",
-                                        interactive=True, wrap=True)
+                                        interactive=True, wrap=False,
+                                        column_widths=PLAN_COLUMN_WIDTHS, max_height=520)
                     gr.Markdown(
                         "The **outfit** column varies wardrobe without breaking identity — "
-                        "leave blank to keep the reference's clothing. Save/load plans as "
-                        "reusable prompt libraries under `shot_plans/`.")
+                        "leave blank to keep the reference's clothing. If your source images "
+                        "all show the same clothes, randomizing here stops the LoRA learning "
+                        "the outfit as part of the character. Save/load plans as reusable "
+                        "prompt libraries under `shot_plans/`.")
+                    with gr.Row():
+                        btn_outfits = gr.Button("🎲 Randomize outfits", scale=1)
+                        btn_outfits_clear = gr.Button("Clear outfits", scale=1)
                     with gr.Row():
                         plan_name = gr.Textbox(label="Plan name", placeholder="my-plan",
                                                scale=2)
@@ -787,8 +898,14 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                         tr_steps = gr.Number(value=_ai_presets[0].steps, precision=0,
                                              label="Steps")
                         tr_lr = gr.Number(value=_ai_presets[0].lr, label="Learning rate")
+                    tr_multi_res = gr.Checkbox(
+                        value=True, label="Multi-resolution buckets",
+                        info="Bucket by the dataset's real aspect ratios instead of "
+                             "forcing one square resolution.")
                 with gr.Column(scale=2):
                     tr_dataset = gr.Textbox(label="Dataset folder (auto-filled by ④ Export)")
+                    btn_inspect = gr.Button("🔍 Inspect dataset & suggest steps")
+                    tr_stats = gr.Markdown()
                     tr_gen = gr.Button("⑤ Generate training config", variant="primary")
                     tr_result = gr.Textbox(label="Result / run command", lines=14)
 
@@ -800,9 +917,13 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
         do_preprocess,
         [pre_files, pre_folder, target, restore_mode, restore_backend, isolate,
          isolation_backend, subject_prompt, exclude_prompt],
-        [prep_gallery, pre_note, log_box, gen_src_folder, cap_folder])
+        [prep_gallery, pre_note, log_box, gen_src_folder, cap_folder]) \
+           .then(lambda s, e: (s, e), [subject_prompt, exclude_prompt],
+                 [gen_subject, gen_exclude])
 
     refresh.click(refresh_plan, [gen_name], [plan])
+    btn_outfits.click(randomize_outfits, [plan], [plan, plan_note])
+    btn_outfits_clear.click(clear_outfits, [plan], [plan, plan_note])
     btn_save_plan.click(do_save_plan, [plan, plan_name], [plan_note])
     btn_load_plan.click(do_load_plan, [plan_name], [plan, plan_note])
     refresh_models.click(refresh_cloud_models, [], [cloud_model])
@@ -815,10 +936,12 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
     cloud_model.change(estimate_cost, [engine, cloud_model, plan], [cost])
     plan.change(estimate_cost, [engine, cloud_model, plan], [cost])
 
-    gen_inputs = [gen_files, gen_src_folder, plan, engine, cloud_model, gen_isolate,
-                  gen_iso_backend, gen_subject]
+    gen_inputs = [gen_files, gen_src_folder, plan, engine, cloud_model,
+                  gen_exclude_props, gen_isolate, gen_iso_backend, gen_subject,
+                  gen_exclude, gen_front]
     btn_gen.click(do_generate, gen_inputs + [gen_out_dir, results_state],
-                  [results_state, gen_gallery, keep, log_box, gen_out_dir, cap_folder])
+                  [results_state, gen_gallery, keep, log_box, gen_out_dir, cap_folder]) \
+           .then(_fill_if_empty, [cap_name, gen_name], [cap_name])
     btn_regen.click(do_regenerate, gen_inputs + [gen_out_dir, results_state, keep],
                     [results_state, gen_gallery, keep, log_box])
     btn_disk.click(do_refresh_disk, [results_state, gen_out_dir],
@@ -832,11 +955,19 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
     btn_edit_load.click(load_one_caption, [cap_folder, cap_edit_file], [cap_edit_text])
     btn_edit_save.click(save_one_caption, [cap_folder, cap_edit_file, cap_edit_text],
                         [cap_result])
-    captioner.change(
-        lambda key: f"**Cost:** {next(c.cost_note for c in CAPTIONERS if c.key == key)}"
-                    + (f"  |  VRAM: {next(c.vram_note for c in CAPTIONERS if c.key == key)}"
-                       if next(c.vram_note for c in CAPTIONERS if c.key == key) else ""),
-        [captioner], [cap_cost])
+    def _cap_cost(key: str, model: str, selected: list[str]) -> str:
+        line = estimate_caption_cost(key, model, len(selected or []))
+        vram = CAPTIONERS_BY_KEY[key].vram_note
+        return f"{line}  \nVRAM: {vram}" if vram else line
+
+    cap_cost_inputs = [captioner, cap_gemini_model, cap_select]
+    captioner.change(_cap_cost, cap_cost_inputs, [cap_cost])
+    cap_gemini_model.change(_cap_cost, cap_cost_inputs, [cap_cost])
+    cap_select.change(_cap_cost, cap_cost_inputs, [cap_cost])
+    # Populate on load too: these only fired on .change, so the cost/VRAM line
+    # was blank until the user touched something.
+    demo.load(_cap_cost, cap_cost_inputs, [cap_cost])
+    demo.load(estimate_cost, [engine, cloud_model, plan], [cost])
     btn_refresh_cap_models.click(refresh_caption_models, [], [cap_gemini_model])
     btn_save_custom.click(
         save_custom_captioner,
@@ -847,20 +978,26 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                    [test_caption])
     btn_caption.click(
         do_caption,
-        [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model],
+        [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model,
+         exp_folders, exp_name, exp_trigger],
         [cap_gallery, cap_select, cap_result, log_box, exp_folders, exp_name, exp_trigger]) \
                .then(_editor_choices, [cap_folder], [cap_edit_file])
 
     btn_export.click(do_export, [exp_folders, exp_name, exp_trigger, output_root],
-                     [exp_result, tr_dataset])
+                     [exp_result, tr_dataset]) \
+              .then(inspect_dataset, [tr_dataset], [tr_stats, tr_steps]) \
+              .then(_fill_if_empty, [tr_name, exp_name], [tr_name]) \
+              .then(_fill_if_empty, [tr_trigger, exp_trigger], [tr_trigger])
 
     tr_hparams = [tr_res, tr_rank, tr_alpha, tr_steps, tr_lr, tr_batch]
     tr_trainer.change(on_trainer_change, [tr_trainer],
                       [tr_model, tr_path] + tr_hparams)
     tr_model.change(on_model_change, [tr_trainer, tr_model], tr_hparams)
     tr_save_path.click(save_trainer_path, [tr_trainer, tr_path], [tr_path_note])
+    btn_inspect.click(inspect_dataset, [tr_dataset], [tr_stats, tr_steps])
     tr_gen.click(do_generate_train_config,
-                 [tr_trainer, tr_model, tr_dataset, tr_path, tr_name, tr_trigger] + tr_hparams,
+                 [tr_trainer, tr_model, tr_dataset, tr_path, tr_name, tr_trigger]
+                 + tr_hparams + [tr_multi_res],
                  [tr_result])
 
 if __name__ == "__main__":
