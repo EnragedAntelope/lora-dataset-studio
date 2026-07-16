@@ -147,6 +147,11 @@ pending queue (it won't interrupt a job already running).
 - The UI binds to `127.0.0.1` with **no authentication** — don't expose it.
 - Training configs are generated, never test-trained. Verify against your trainer's docs
   before a long run.
+- **Update check:** on launch the app makes one anonymous request to GitHub's public
+  releases API to see if a newer version is out, and shows a small dismissible banner if
+  so — no data about you or your usage is sent. Result is cached 24h in
+  `.cache/update_check.json`. Set `LDS_UPDATE_CHECK_ENABLED=false` (in `.env`) to disable
+  it entirely, no network call at all.
 
 More detail: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
