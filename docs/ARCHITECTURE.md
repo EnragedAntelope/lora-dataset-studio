@@ -137,6 +137,13 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
   refetch. Any exception — offline, rate-limited, no releases published yet — is caught
   and simply shows no banner; it must never raise into the UI. `LDS_UPDATE_CHECK_ENABLED=
   false` skips the network call entirely.
+- **The update check reads GitHub Releases, not commits or tags.** It compares
+  `studio.__version__` against `GET /repos/.../releases/latest`, which 404s (silently, no
+  banner) until a Release object exists — a `git tag` alone is not enough. So **every
+  version bump needs both**: (1) update `__version__` in `studio/__init__.py` to match
+  the `Version:` line at the top of this file, and (2) publish a Release —
+  `gh release create vX.Y.Z --title "vX.Y.Z" --generate-notes` — targeting the commit
+  that lands the bump. Skipping step 2 means users on the old version never see a notice.
 - **Gemini caption default is a rolling alias.** The Gemini captioner defaults to
   `gemini-flash-latest` so it doesn't 404 when a pinned version is decommissioned (as
   `gemini-2.5-flash` was for new keys). The Caption tab can refresh and pick a specific
