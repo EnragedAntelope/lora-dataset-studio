@@ -245,6 +245,10 @@ class Settings(BaseSettings):
     groq_api_key: str = ""  # also read from GROQ_API_KEY if unset
     gemini_image_model: str = "gemini-3-pro-image-preview"
 
+    # Checks GitHub releases for a newer version at UI launch (cached 24h,
+    # best-effort, never blocks). Set false to disable entirely (no network call).
+    update_check_enabled: bool = True
+
     target_long_side: int = 1024
     default_engine: str = "gemini"
     default_captioner: str = "qwen3vl"

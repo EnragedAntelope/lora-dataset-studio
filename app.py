@@ -645,6 +645,18 @@ def refresh_caption_models():
         value = ids[0]
     return gr.Dropdown(choices=models, value=value)
 
+
+def _check_for_update():
+    """Best-effort GitHub release check on UI load; silently shows nothing on
+    any failure (offline, rate-limited, disabled) so it can never block launch."""
+    from studio.update_check import update_banner_markdown
+
+    try:
+        text = update_banner_markdown()
+    except Exception:
+        text = ""
+    return gr.Markdown(value=text, visible=bool(text))
+
 # ---------- layout ----------
 
 with gr.Blocks(title="LoRA Dataset Studio") as demo:
@@ -662,6 +674,7 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
         "or send to third-party services — make sure you have the rights to your sources and "
         "comply with each provider's policies and the law. See **Costs & your responsibility** below."
     )
+    update_notice = gr.Markdown(visible=False)
     with gr.Accordion("💲 Costs & your responsibility (read me)", open=False):
         gr.Markdown(
             "**Costs**\n"
@@ -999,6 +1012,8 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                  [tr_trainer, tr_model, tr_dataset, tr_path, tr_name, tr_trigger]
                  + tr_hparams + [tr_multi_res],
                  [tr_result])
+
+    demo.load(_check_for_update, None, update_notice)
 
 if __name__ == "__main__":
     # Bound to localhost on purpose: no auth layer, and .env keys are reachable

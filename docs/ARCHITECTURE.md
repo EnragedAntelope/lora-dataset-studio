@@ -30,6 +30,8 @@ studio/
   user_config.py        Persist trainer install paths, last training settings, and the
                         custom captioner endpoint (URL/model/key-env-NAME/spacing) to
                         .cache/user_settings.json (no secrets; gitignored)
+  update_check.py        Best-effort GitHub-release check (cached 24h) -> dismissible
+                        UI banner when a newer version is published
   comfy_api.py          Thin ComfyUI HTTP client (upload, queue, poll, fetch, free)
   engines/
     base.py             Engine protocol + GenerationError
@@ -129,6 +131,12 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
   to `.cache/gemini_caption_models.json`, both with a 24-hour TTL. The UI seeds each
   dropdown from cache (never a network call on startup); a refresh button force-pulls.
   Both fall back to a static list if the API is unreachable or no key is set.
+- **Update check is best-effort by design.** `update_check.py` hits the GitHub releases
+  API on `demo.load` (not at process start, so it can't slow down launch), caches the
+  result 24h in `.cache/update_check.json`, and falls back to a stale cache on a failed
+  refetch. Any exception — offline, rate-limited, no releases published yet — is caught
+  and simply shows no banner; it must never raise into the UI. `LDS_UPDATE_CHECK_ENABLED=
+  false` skips the network call entirely.
 - **Gemini caption default is a rolling alias.** The Gemini captioner defaults to
   `gemini-flash-latest` so it doesn't 404 when a pinned version is decommissioned (as
   `gemini-2.5-flash` was for new keys). The Caption tab can refresh and pick a specific
