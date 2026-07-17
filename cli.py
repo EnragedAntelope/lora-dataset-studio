@@ -158,23 +158,21 @@ def export(
     output_root: Path = typer.Option(settings.output_root),
 ):
     """Package captioned folders into a flat NN.png/NN.txt dataset (standalone)."""
-    from studio.package import package_dataset
+    from studio.package import package_dataset, resolve_export_items
 
-    items, missing = [], []
-    for folder in folders:
-        for img in list_images(folder):
-            txt = img.with_suffix(".txt")
-            (items.append((img, txt.read_text(encoding="utf-8").strip()))
-             if txt.exists() else missing.append(img.name))
-    if not items:
+    candidates = [img for folder in folders for img in list_images(folder)]
+    res = resolve_export_items(candidates)
+    if not res.items:
         typer.echo("No captioned images found — run `caption` first.")
         raise typer.Exit(1)
-    if missing:
-        typer.echo(f"Skipping {len(missing)} uncaptioned image(s): {', '.join(missing)}")
+    skipped = res.missing + res.empties
+    if skipped:
+        typer.echo(f"Skipping {len(skipped)} image(s) without a usable caption: "
+                   f"{', '.join(skipped)}")
     metadata = {"character_name": name, "trigger": trigger,
                 "source_folders": [str(f) for f in folders],
-                "skipped_uncaptioned": missing}
-    ds = package_dataset(items, output_root, name, trigger, metadata)
+                "skipped_uncaptioned": res.missing, "skipped_empty_caption": res.empties}
+    ds = package_dataset(res.items, output_root, name, trigger, metadata)
     typer.echo(f"Dataset written to {ds}")
 
 
