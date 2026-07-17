@@ -9,13 +9,46 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 
 
 def slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return slug or "character"
+
+
+@dataclass
+class ExportResolution:
+    """Classification of candidate export images by caption sidecar state."""
+    items: list[tuple[Path, str]]  # (image, non-empty caption) -> exported
+    empties: list[str]             # sidecar present but blank (image name)
+    missing: list[str]             # no .txt sidecar (image name)
+
+
+def resolve_export_items(image_paths: Iterable[Path]) -> ExportResolution:
+    """Read each image's sibling .txt and classify it for export.
+
+    Order-preserving. Full paths in, so identically-named files in different
+    folders never collide. Only `items` are packaged; `empties`/`missing`
+    surface as pre-export warnings.
+    """
+    items: list[tuple[Path, str]] = []
+    empties: list[str] = []
+    missing: list[str] = []
+    for img in image_paths:
+        txt = img.with_suffix(".txt")
+        if not txt.exists():
+            missing.append(img.name)
+            continue
+        caption = txt.read_text(encoding="utf-8").strip()
+        if caption:
+            items.append((img, caption))
+        else:
+            empties.append(img.name)
+    return ExportResolution(items=items, empties=empties, missing=missing)
 
 
 def package_dataset(
