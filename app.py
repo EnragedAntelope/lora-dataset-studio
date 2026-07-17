@@ -426,49 +426,70 @@ def do_caption(folder: str, selected: list[str], captioner_key: str,
 
 # ---------- ④ export ----------
 
-def do_export(folders_text: str, name: str, trigger: str, output_root: str):
+def _export_flag(img: Path) -> str:
+    txt = img.with_suffix(".txt")
+    if not txt.exists():
+        return "⚠ no caption"
+    return "✓" if txt.read_text(encoding="utf-8").strip() else "⚠ empty"
+
+
+def _export_label(img: Path) -> tuple[str, str]:
+    """(checkbox label, value). Value is the full path so same-named files in
+    different folders never collide; label is folder/name + caption flag."""
+    return f"{img.parent.name}/{img.name} — {_export_flag(img)}", str(img)
+
+
+def load_export_preview(folders_text: str):
     folders = [Path(line.strip()) for line in folders_text.splitlines() if line.strip()]
     if not folders:
         raise gr.Error("Enter at least one folder of captioned images (one per line).")
-    from studio.package import package_dataset
+    images = [img for folder in folders for img in list_images(folder)]
+    if not images:
+        raise gr.Error("No images found in the listed folder(s).")
+    gallery = [(str(img), f"{img.parent.name}/{img.name} — {_export_flag(img)}")
+               for img in images]
+    choices = [_export_label(img) for img in images]
+    values = [v for _, v in choices]  # all checked by default (uncheck to drop)
+    ready = sum(1 for img in images if _export_flag(img) == "✓")
+    empty = sum(1 for img in images if _export_flag(img) == "⚠ empty")
+    none_ = sum(1 for img in images if _export_flag(img) == "⚠ no caption")
+    note = (f"**{len(images)} image(s)** — {ready} ready · {empty} empty caption · "
+            f"{none_} no caption. All checked below; **uncheck to drop**. "
+            "Images without a usable caption are skipped even if left checked.")
+    return gallery, gr.CheckboxGroup(choices=choices, value=values), note
 
-    items: list[tuple[Path, str]] = []
-    missing: list[str] = []
-    for folder in folders:
-        for img in list_images(folder):
-            txt = img.with_suffix(".txt")
-            if txt.exists():
-                items.append((img, txt.read_text(encoding="utf-8").strip()))
-            else:
-                missing.append(f"{folder.name}/{img.name}")
-    if not items:
-        raise gr.Error("No captioned images found — run ③ Caption first "
-                       "(each exported image needs a .txt sidecar).")
+
+def do_export(selected: list[str], name: str, trigger: str, output_root: str):
+    if not selected:
+        raise gr.Error("Click '📂 Load & preview', then keep at least one image checked.")
+    from studio.package import package_dataset, resolve_export_items
+
+    paths = [Path(s) for s in selected]
+    res = resolve_export_items(paths)
+    if not res.items:
+        raise gr.Error("None of the checked images have a usable caption — "
+                       "run ③ Caption first (each export needs a non-empty .txt).")
+    source_folders = sorted({str(p.parent) for p in paths})
     metadata = {"character_name": name, "trigger": trigger,
-                "source_folders": [str(f) for f in folders],
-                "skipped_uncaptioned": missing}
+                "source_folders": source_folders,
+                "skipped_uncaptioned": res.missing,
+                "skipped_empty_caption": res.empties}
     out_root = _validate_out_dir(output_root)
     try:
-        ds = package_dataset(items, out_root, name, trigger, metadata)
+        ds = package_dataset(res.items, out_root, name, trigger, metadata)
     except OSError as e:
         raise gr.Error(f"Couldn't write the dataset to '{out_root}': {e}. Check the "
                        f"output folder path (valid drive, no forbidden characters, writable).")
-    # Show the first numbered caption (README.txt is excluded); flag empties so
-    # a silently blank caption is obvious rather than looking like a UI glitch.
+    # Show the first numbered caption (README.txt is excluded).
     caption_files = sorted(p for p in ds.glob("*.txt") if p.name != "README.txt")
     samples = [(p.name, p.read_text(encoding="utf-8").strip()) for p in caption_files]
-    empties = [n for n, t in samples if not t]
     first = next(((n, t) for n, t in samples if t), None)
-    if first:
-        sample_block = f"\n\nSample caption ({first[0]}):\n{first[1]}"
-    else:
-        sample_block = ("\n\n⚠️ Every exported caption is EMPTY — re-run ③ Caption "
-                        "(if you used a Groq/thinking model, update the app so its "
-                        "reasoning is disabled).")
-    skipped = f"\n⚠️ Skipped (no caption sidecar): {', '.join(missing)}" if missing else ""
-    empty_note = (f"\n⚠️ {len(empties)} exported caption(s) are empty: "
-                  f"{', '.join(empties)}" if empties and first else "")
-    result = (f"✅ Dataset ready: {ds}  ({len(items)} image/caption pairs)"
+    sample_block = f"\n\nSample caption ({first[0]}):\n{first[1]}" if first else ""
+    skipped = (f"\n⚠️ Skipped (no caption): {', '.join(res.missing)}"
+               if res.missing else "")
+    empty_note = (f"\n⚠️ Skipped (empty caption): {', '.join(res.empties)}"
+                  if res.empties else "")
+    result = (f"✅ Dataset ready: {ds}  ({len(res.items)} image/caption pairs)"
               f"{skipped}{empty_note}{sample_block}")
     return result, str(ds)  # second value auto-fills the ⑤ Train tab
 
@@ -866,8 +887,15 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
             gr.Markdown("Package captioned images into a flat `NN.png` + `NN.txt` dataset "
                         "folder (ai-toolkit / OneTrainer ready), with `metadata.json` and "
                         "`README.txt`. List one or more folders (one per line) — e.g. the "
-                        "preprocessed sources **and** the generated shots.")
+                        "preprocessed sources **and** the generated shots — then **Load & "
+                        "preview** to make your final pick before exporting.")
             exp_folders = gr.Textbox(label="Folders of captioned images (one per line)", lines=3)
+            btn_load_preview = gr.Button("📂 Load & preview")
+            exp_preview_note = gr.Markdown()
+            exp_gallery = gr.Gallery(label="Final review — click a thumbnail to zoom",
+                                     columns=6, height=420, allow_preview=True)
+            exp_select = gr.CheckboxGroup(
+                label="✅ Images to export — UNCHECK to drop", choices=[])
             with gr.Row():
                 exp_name = gr.Textbox(label="Character name", placeholder="Sy Snootles")
                 exp_trigger = gr.Textbox(label="Trigger word", placeholder="sysnootles")
@@ -996,7 +1024,9 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
         [cap_gallery, cap_select, cap_result, log_box, exp_folders, exp_name, exp_trigger]) \
                .then(_editor_choices, [cap_folder], [cap_edit_file])
 
-    btn_export.click(do_export, [exp_folders, exp_name, exp_trigger, output_root],
+    btn_load_preview.click(load_export_preview, [exp_folders],
+                           [exp_gallery, exp_select, exp_preview_note])
+    btn_export.click(do_export, [exp_select, exp_name, exp_trigger, output_root],
                      [exp_result, tr_dataset]) \
               .then(inspect_dataset, [tr_dataset], [tr_stats, tr_steps]) \
               .then(_fill_if_empty, [tr_name, exp_name], [tr_name]) \
