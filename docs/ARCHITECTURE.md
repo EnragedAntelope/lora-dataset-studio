@@ -1,6 +1,6 @@
 # Architecture
 
-Version: 0.4.0
+Version: 0.5.0
 
 ```
 app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)
@@ -16,7 +16,9 @@ studio/
                         Captioner takes model_override (Gemini model picker) and
                         spec_overrides (runtime config for the custom endpoint)
   quality.py            Advisory sharpness check (variance of Laplacian, numpy-only)
-  package.py            Dataset export (NN.png/NN.txt + metadata.json + README.txt)
+  package.py            Dataset export (NN.png/NN.txt + metadata.json + README.txt);
+                        resolve_export_items() classifies candidates by caption sidecar
+                        state (ready/empty/missing) — shared by the UI gate and the CLI
   shotplan.py           Default shot plan (curated 24 shots: angles, poses, emotions,
                         settings + outfit merged into each shot) + Shot model +
                         apply_wardrobe() outfit injection + apply_prop_exclusion()
@@ -210,10 +212,25 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
   numbered `.txt` files (excluding `README.txt`), shows the first non-empty one, and
   explicitly flags when captions are empty — so a blank-caption bug (e.g. a thinking
   model burning the token budget) is visible instead of looking like a UI glitch.
+- **Export is selection-gated, path-keyed.** ④ requires "Load & preview" before
+  export; the `CheckboxGroup` value is the full image path (not a `gr.State`), so
+  identically-named files in different folders never collide and the stage stays
+  stateless. `resolve_export_items()` (in `package.py`) is the single scan/classify
+  seam shared by the UI and `cli.py export`; a checked image with a missing/empty
+  caption is skipped and reported, never silently dropped or fatal. Caption status
+  (✓ / ⚠ empty / ⚠ no caption) is surfaced per image *before* packaging.
 
 ## Roadmap / deferred
 
-Done this revision (0.4.0):
+Done this revision (0.5.0):
+
+- ✅ **Final export selection gate** — ④ gains "Load & preview" → gallery + all-checked
+  `CheckboxGroup` (UNCHECK-to-drop, matching ②/③); export packages only checked images.
+  Per-image caption status (✓ / empty / missing) is surfaced *before* packaging, plus
+  click-to-zoom review. Shared `resolve_export_items()` de-duplicates the UI/CLI scan
+  loop; verified end-to-end incl. same-name cross-folder files and empty-selection guards.
+
+Done in 0.4.0:
 
 - ✅ **Isolation over-cutting fixed** — comma-split exclusion terms, dilation off by
   default, no-op detection + reporting. Verified against a reference image: output is now

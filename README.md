@@ -59,8 +59,9 @@ flagged automatically.
 **③ Caption** — point at **any** folder, pick a captioner, write `.txt` sidecars. Test a
 single caption first to compare captioners cheaply, and hand-edit any result inline.
 
-**④ Export** — list your captioned folders; get a flat `NN.png` + `NN.txt` dataset with
-`metadata.json`.
+**④ Export** — list your captioned folders, **Load & preview** to see every image with
+its caption status (✓ / empty / missing), then **uncheck** anything you don't want and
+export. You get a flat `NN.png` + `NN.txt` dataset with `metadata.json`.
 
 **⑤ Train config** *(optional)* — inspects your dataset and writes an ai-toolkit
 `config.yaml` or musubi `dataset.toml`, with steps and buckets derived from the images you
