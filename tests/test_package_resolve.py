@@ -39,8 +39,10 @@ def test_blank_sidecar_is_empty(tmp_path):
 
 
 def test_same_name_two_folders_no_collision(tmp_path):
-    f1 = tmp_path / "prepped"; f1.mkdir()
-    f2 = tmp_path / "generated"; f2.mkdir()
+    f1 = tmp_path / "prepped"
+    f1.mkdir()
+    f2 = tmp_path / "generated"
+    f2.mkdir()
     a = _img(f1, "01.png", "from prepped")
     b = _img(f2, "01.png", "from generated")
     res = resolve_export_items([a, b])
