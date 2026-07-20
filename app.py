@@ -347,6 +347,9 @@ def do_test_caption(folder: str, selected: list[str], captioner_key: str,
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select at least one image first.")
     path = Path(folder.strip()) / selected[0]
+    # A dedicated tagger always emits Danbooru tags, whatever the radio says.
+    if CAPTIONERS_BY_KEY[captioner_key].backend == "wd_tagger":
+        style = "tags"
     model_override, spec_overrides = _resolve_captioner_config(captioner_key, gemini_model)
     cap = Captioner(captioner_key, model_override=model_override, spec_overrides=spec_overrides)
     try:
@@ -461,7 +464,8 @@ def load_export_preview(folders_text: str):
     return gallery, gr.CheckboxGroup(choices=choices, value=values), note
 
 
-def do_export(selected: list[str], name: str, trigger: str, output_root: str):
+def do_export(selected: list[str], name: str, trigger: str, output_root: str,
+              make_zip: bool = False):
     if not selected:
         raise gr.Error("Click '📂 Load & preview', then keep at least one image checked.")
     from studio.package import package_dataset, resolve_export_items
@@ -491,9 +495,40 @@ def do_export(selected: list[str], name: str, trigger: str, output_root: str):
                if res.missing else "")
     empty_note = (f"\n⚠️ Skipped (empty caption): {', '.join(res.empties)}"
                   if res.empties else "")
+    zip_note = ""
+    if make_zip:
+        from studio.package import zip_dataset
+
+        try:
+            zip_note = f"\n🗜️ Zipped: {zip_dataset(ds)}"
+        except OSError as e:
+            zip_note = f"\n⚠️ Could not write the .zip: {e}"
     result = (f"✅ Dataset ready: {ds}  ({len(res.items)} image/caption pairs)"
-              f"{skipped}{empty_note}{sample_block}")
-    return result, str(ds)  # second value auto-fills the ⑤ Train tab
+              f"{skipped}{empty_note}{zip_note}{sample_block}")
+    # ds path auto-fills the ⑤ Train tab AND the HF-publish box below.
+    return result, str(ds), str(ds)
+
+
+def do_publish_hf(ds_dir: str, repo_id: str, private: bool, progress=gr.Progress()):
+    """Publish an exported dataset folder to the Hugging Face Hub (opt-in)."""
+    from studio.hf_publish import HFPublishError, publish_dataset
+
+    if not (ds_dir or "").strip():
+        raise gr.Error("Export a dataset first (④) — then publish the folder it created.")
+    log: list[str] = []
+
+    def report(msg: str):
+        log.append(msg)
+        progress((len(log), 3), desc=msg)
+
+    try:
+        url = publish_dataset(ds_dir.strip(), repo_id, private=bool(private), progress=report)
+    except HFPublishError as e:
+        raise gr.Error(str(e))
+    except Exception as e:  # network/auth/etc. — surface, never crash the UI
+        raise gr.Error(f"Publishing failed: {e}")
+    vis = "private" if private else "PUBLIC"
+    return f"✅ Published ({vis}): [{url}]({url})"
 
 
 # ---------- misc ----------
@@ -849,7 +884,8 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                         info="Match your target base model: tag-trained checkpoints want "
                              "comma-separated tags, not prose. Danbooru and e621 are different "
                              "vocabularies — pick the one your base model was trained on. The "
-                             "trigger stays first either way.")
+                             "trigger stays first either way. (The 'Local tagger' captioners "
+                             "ignore this and always emit canonical Danbooru tags.)")
                     cap_cost = gr.Markdown()
                     cap_gemini_model = gr.Dropdown(
                         CAPTION_MODEL_CHOICES, value=_DEFAULT_CAPTION_MODEL,
@@ -912,8 +948,27 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                 exp_name = gr.Textbox(label="Character name", placeholder="Sy Snootles")
                 exp_trigger = gr.Textbox(label="Trigger word", placeholder="sysnootles")
             output_root = gr.Textbox(label="Output folder", value=str(settings.output_root))
+            exp_zip = gr.Checkbox(
+                value=False, label="Also save a .zip of the dataset",
+                info="A single archive next to the folder — handy for uploading to a cloud trainer.")
             btn_export = gr.Button("④ Export dataset", variant="primary")
             exp_result = gr.Textbox(label="Result", lines=8)
+            with gr.Accordion("Publish to Hugging Face (optional)", open=False):
+                gr.Markdown(
+                    "Upload the exported dataset to the **Hugging Face Hub**. Created "
+                    "**private by default** — uncheck only if you deliberately want it public. "
+                    "**You are responsible** for holding the rights to every image and for "
+                    "following [Hugging Face's terms](https://huggingface.co/terms-of-service). "
+                    "Needs a **write** token in `.env` as `HF_TOKEN` "
+                    "([create one](https://huggingface.co/settings/tokens)). Nothing is uploaded "
+                    "until you click the button.")
+                exp_ds_dir = gr.Textbox(label="Dataset folder to publish (auto-filled by ④ Export)")
+                with gr.Row():
+                    exp_hf_repo = gr.Textbox(label="Dataset name (or owner/name)",
+                                             placeholder="my-character-lora")
+                    exp_hf_private = gr.Checkbox(value=True, label="Private (recommended)")
+                btn_publish_hf = gr.Button("⬆ Publish to Hugging Face")
+                exp_hf_note = gr.Markdown()
 
         with gr.Tab("⑤ Train (configs, optional)"):
             gr.Markdown(
@@ -1039,11 +1094,13 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
 
     btn_load_preview.click(load_export_preview, [exp_folders],
                            [exp_gallery, exp_select, exp_preview_note])
-    btn_export.click(do_export, [exp_select, exp_name, exp_trigger, output_root],
-                     [exp_result, tr_dataset]) \
+    btn_export.click(do_export, [exp_select, exp_name, exp_trigger, output_root, exp_zip],
+                     [exp_result, tr_dataset, exp_ds_dir]) \
               .then(inspect_dataset, [tr_dataset], [tr_stats, tr_steps]) \
               .then(_fill_if_empty, [tr_name, exp_name], [tr_name]) \
               .then(_fill_if_empty, [tr_trigger, exp_trigger], [tr_trigger])
+    btn_publish_hf.click(do_publish_hf, [exp_ds_dir, exp_hf_repo, exp_hf_private],
+                         [exp_hf_note])
 
     tr_hparams = [tr_res, tr_rank, tr_alpha, tr_steps, tr_lr, tr_batch]
     tr_trainer.change(on_trainer_change, [tr_trainer],

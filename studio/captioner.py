@@ -105,12 +105,17 @@ class Captioner:
         self.model = (model_override or self.spec.model).strip()
         self._model = None
         self._processor = None
+        self._tagger = None
         self._last_request = 0.0
 
     # ---------- shared ----------
 
     def caption(self, image_path: Path, subject: str = "the character",
                 style: str = "prose") -> str:
+        if self.spec.backend == "wd_tagger":
+            # A dedicated tagger emits Danbooru tags directly; the prose/tags/e621
+            # style selector and the subject don't apply to it.
+            return ", ".join(self._load_tagger().tag(image_path))
         instruction = self.spec.prompt_for(style).format(subject=subject)
         if self.spec.backend == "openai":
             return _clean(self._caption_openai(image_path, instruction))
@@ -121,8 +126,22 @@ class Captioner:
     def load(self) -> None:
         if self.spec.backend == "transformers":
             self._load_transformers()
+        elif self.spec.backend == "wd_tagger":
+            self._load_tagger()
+
+    def _load_tagger(self):
+        if self._tagger is None:
+            from studio.tagger import WDTagger
+
+            self._tagger = WDTagger(self.spec.hf_id, self.spec.general_threshold,
+                                    self.spec.character_threshold)
+        self._tagger.load()
+        return self._tagger
 
     def unload(self) -> None:
+        if self._tagger is not None:
+            self._tagger.unload()
+            self._tagger = None
         if self._model is None:
             return
         import gc
@@ -351,6 +370,8 @@ def caption_images(
     subject = character_name or "the character"
     cap = Captioner(captioner_key, model_override=model_override,
                     spec_overrides=spec_overrides)
+    # A dedicated tagger always emits Danbooru tags, whatever `style` requested.
+    style = "tags" if cap.spec.backend == "wd_tagger" else style
     if cap.spec.backend == "transformers":
         from studio import comfy_api
 
@@ -361,6 +382,9 @@ def caption_images(
 
         isolate.unload()  # SAM3 and a 17 GB captioner don't co-fit on most GPUs
         progress(f"Loading captioner {cap.spec.label} (first run downloads weights)...")
+        cap.load()
+    elif cap.spec.backend == "wd_tagger":
+        progress(f"Loading {cap.spec.label} (first run downloads weights)...")
         cap.load()
     else:
         progress(f"Captioning via {cap.spec.label}...")

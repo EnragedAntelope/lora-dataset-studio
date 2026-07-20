@@ -168,6 +168,12 @@ def export(
     name: str = typer.Option("", help="Character name"),
     trigger: str = typer.Option("", help="Trigger word"),
     output_root: Path = typer.Option(settings.output_root),
+    zip_: bool = typer.Option(False, "--zip", help="Also write a .zip of the dataset"),
+    publish_hf: str = typer.Option(
+        "", "--publish-hf",
+        help="Publish to the HF Hub as this dataset id (needs a write HF_TOKEN)"),
+    hf_private: bool = typer.Option(
+        True, "--hf-private/--hf-public", help="Visibility of the published HF dataset"),
 ):
     """Package captioned folders into a flat NN.png/NN.txt dataset (standalone)."""
     from studio.package import package_dataset, resolve_export_items
@@ -186,6 +192,19 @@ def export(
                 "skipped_uncaptioned": res.missing, "skipped_empty_caption": res.empties}
     ds = package_dataset(res.items, output_root, name, trigger, metadata)
     typer.echo(f"Dataset written to {ds}")
+    if zip_:
+        from studio.package import zip_dataset
+
+        typer.echo(f"Zipped: {zip_dataset(ds)}")
+    if publish_hf.strip():
+        from studio.hf_publish import HFPublishError, publish_dataset
+
+        try:
+            url = publish_dataset(ds, publish_hf, private=hf_private, progress=typer.echo)
+        except HFPublishError as e:
+            typer.echo(str(e))
+            raise typer.Exit(1)
+        typer.echo(f"Published: {url}")
 
 
 @app.command()
@@ -214,6 +233,7 @@ def build(
         help="Ask the generator to omit bags/held objects from the reference"),
     randomize_outfits: bool = typer.Option(
         False, help="Dress angle/pose shots in random unisex outfits"),
+    zip_: bool = typer.Option(False, "--zip", help="Also write a .zip of the dataset"),
 ):
     """Full pipeline: preprocess -> generate -> caption -> export."""
     from studio.captioner import caption_images
@@ -256,6 +276,10 @@ def build(
         "shots": [{"id": r.shot.id, "seed": r.seed, "error": r.error} for r in results],
     }
     ds = package_dataset(items, output_root, name, trigger, metadata)
+    if zip_:
+        from studio.package import zip_dataset
+
+        typer.echo(f"Zipped: {zip_dataset(ds)}")
     typer.echo(f"\nDone: {ds}")
 
 

@@ -15,6 +15,12 @@ pydantic-settings>=2.3
 numpy>=1.26
 pandas>=2.0
 pyyaml>=6.0
+huggingface-hub>=0.24   # HF dataset publishing (④) + tagger/model downloads
+
+# Optional: only the WD tagger captioner (③) needs onnxruntime. This is the CPU
+# build; on CUDA you can swap it for onnxruntime-gpu. It is lazy-imported, so the
+# app runs fine without it until you pick a tagger.
+onnxruntime>=1.17
 
 # dev/test
 pytest>=8.0

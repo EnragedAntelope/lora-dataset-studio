@@ -120,9 +120,10 @@ _NSFW_E621_PROMPT = _BASE_E621_PROMPT + (
 class CaptionerSpec(BaseModel):
     key: str
     label: str
-    # "transformers" (local GPU) | "openai" (Groq / LM Studio / Ollama) | "gemini" (Google)
+    # "transformers" (local GPU VLM) | "openai" (Groq / LM Studio / Ollama) |
+    # "gemini" (Google) | "wd_tagger" (local ONNX Danbooru tagger)
     backend: str = "transformers"
-    hf_id: str = ""  # transformers backend
+    hf_id: str = ""  # transformers + wd_tagger backends (HF repo id)
     model: str = ""  # openai/gemini backend model id ("" = server default / first listed)
     base_url: str = ""  # openai backend endpoint
     api_key_env: str = ""  # env var holding the key ("" = no key needed)
@@ -140,6 +141,9 @@ class CaptionerSpec(BaseModel):
     # "qwen_vl" and "llava" share one transformers code path but need
     # different chat-template quirks (JoyCaption wants its system prompt).
     prompt_style: str = "qwen_vl"
+    # wd_tagger backend: probability cut-offs for general vs character tags.
+    general_threshold: float = 0.35
+    character_threshold: float = 0.85
     vram_note: str = ""
     nsfw_capable: bool = True
     cost_note: str = "free"
@@ -184,6 +188,25 @@ CAPTIONERS: list[CaptionerSpec] = [
         tags_template=_NSFW_TAGS_PROMPT,
         e621_template=_NSFW_E621_PROMPT,
         vram_note="~17 GB bf16",
+    ),
+    # Dedicated taggers: emit canonical Danbooru tags directly (no VLM prose).
+    # They ignore the prose/tags/e621 style selector — a tagger always produces
+    # Danbooru tags. Needs `onnxruntime` (optional dep); weights download once.
+    CaptionerSpec(
+        key="wd-eva02",
+        label="Local tagger: WD EVA02-Large v3 (canonical Danbooru tags)",
+        backend="wd_tagger",
+        hf_id="SmilingWolf/wd-eva02-large-tagger-v3",
+        vram_note="~1.4 GB ONNX (needs onnxruntime)",
+        cost_note="free (local tagger)",
+    ),
+    CaptionerSpec(
+        key="wd-vit",
+        label="Local tagger: WD ViT v3 (Danbooru tags, lighter/faster)",
+        backend="wd_tagger",
+        hf_id="SmilingWolf/wd-vit-tagger-v3",
+        vram_note="~0.4 GB ONNX (needs onnxruntime)",
+        cost_note="free (local tagger)",
     ),
     CaptionerSpec(
         key="gemini-flash",

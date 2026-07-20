@@ -39,6 +39,12 @@ class ModelPreset(BaseModel):
     arch: str = ""
     is_flux: bool = False
     quantize: bool = True
+    # ai-toolkit train/sample knobs that vary by architecture family. Defaults
+    # match the flow-matching models (Flux / Qwen-Image / Z-Image); SDXL, which
+    # is not flow-matching, overrides them (ddpm scheduler, higher CFG).
+    noise_scheduler: str = "flowmatch"
+    sample_guidance: float = 4.0
+    sample_steps: int = 20
     # musubi training script (…_train_network.py). Placeholder when unverified.
     musubi_script: str = "<<FILL: see musubi docs for this arch>>"
     # per-model defaults (UI pre-fills these; the user can override)
@@ -62,6 +68,18 @@ TRAINER_MODELS: dict[str, list[ModelPreset]] = {
                     name_or_path="black-forest-labs/FLUX.2-dev", arch="flux2"),
         ModelPreset(key="qwen-image", label="Qwen-Image",
                     name_or_path="Qwen/Qwen-Image", arch="qwen_image"),
+        # SDXL is not flow-matching: it wants the ddpm scheduler and higher CFG,
+        # and is small enough to train unquantized. Pairs with Danbooru/e621 tag
+        # captions (③), which is what these checkpoints are trained on.
+        ModelPreset(key="sdxl", label="SDXL 1.0 (base)",
+                    name_or_path="stabilityai/stable-diffusion-xl-base-1.0",
+                    arch="sdxl", quantize=False, noise_scheduler="ddpm",
+                    sample_guidance=7.0, sample_steps=25),
+        ModelPreset(key="sdxl-custom",
+                    label="SDXL-family checkpoint — Pony / Illustrious / NoobAI (set path)",
+                    name_or_path="<<FILL: your SDXL-family checkpoint HF id or local path>>",
+                    arch="sdxl", quantize=False, noise_scheduler="ddpm",
+                    sample_guidance=7.0, sample_steps=25),
         ModelPreset(key="zimage", label="Z-Image",
                     name_or_path="<<FILL: Z-Image model path or HF id>>",
                     arch="zimage"),
@@ -151,7 +169,7 @@ def render_aitoolkit_yaml(cfg: TrainConfig) -> str:
         "        train_unet: true\n"
         "        train_text_encoder: false\n"
         "        gradient_checkpointing: true\n"
-        "        noise_scheduler: flowmatch\n"
+        f"        noise_scheduler: {m.noise_scheduler}\n"
         f"        optimizer: adamw8bit\n"
         f"        lr: {cfg.lr}\n"
         "        dtype: bf16\n"
@@ -165,8 +183,8 @@ def render_aitoolkit_yaml(cfg: TrainConfig) -> str:
         "        height: 1024\n"
         "        prompts:\n"
         f"          - \"{_sample_prompt(cfg)}\"\n"
-        "        guidance_scale: 4\n"
-        "        sample_steps: 20\n"
+        f"        guidance_scale: {m.sample_guidance:g}\n"
+        f"        sample_steps: {m.sample_steps}\n"
         "meta:\n"
         "  name: \"[name]\"\n"
         "  version: \"1.0\"\n"

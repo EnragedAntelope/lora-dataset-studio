@@ -1,6 +1,6 @@
 # Architecture
 
-Version: 0.6.0
+Version: 0.7.0
 
 ```
 app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)
@@ -11,7 +11,14 @@ studio/
   pipeline.py           Stage orchestration: preprocess_sources(), generate_shots()
   preprocess.py         Restore (comfyui|basic|auto) + isolate + resize
   isolate.py            Subject isolation: builtin SAM3 (transformers) | comfyui
-  captioner.py          Captioner backends (transformers | gemini | openai-compat),
+  tagger.py             WD (SmilingWolf) ONNX tagger backend: canonical Danbooru
+                        tags straight from image features. Pure select/format
+                        logic is I/O-free (unit-tested); onnxruntime + hub download
+                        are lazy. Exposed as the "wd_tagger" captioner backend
+  hf_publish.py         Optional, opt-in publish of a dataset folder to the HF Hub
+                        (private by default; write HF_TOKEN; huggingface_hub lazy)
+  captioner.py          Captioner backends (transformers | gemini | openai-compat |
+                        wd_tagger),
                         caption finalization, standalone caption_folder().
                         Captioner takes model_override (Gemini model picker) and
                         spec_overrides (runtime config for the custom endpoint).
@@ -20,6 +27,7 @@ studio/
                         lowercase, trigger-first)
   quality.py            Advisory sharpness check (variance of Laplacian, numpy-only)
   package.py            Dataset export (NN.png/NN.txt + metadata.json + README.txt);
+                        zip_dataset() bundles a packaged folder into a sibling .zip;
                         resolve_export_items() classifies candidates by caption sidecar
                         state (ready/empty/missing) — shared by the UI gate and the CLI
   shotplan.py           Default shot plan (curated 24 shots: angles, poses, emotions,
@@ -31,7 +39,11 @@ studio/
   dataset_stats.py      Inspect a dataset folder (count/sizes/aspects) -> suggested
                         steps + bucket ladder, so ⑤'s numbers are derived not guessed
   trainer_configs.py    Emit LoRA-trainer configs (ai-toolkit config.yaml / musubi
-                        dataset.toml) + run-command builders + model registry
+                        dataset.toml) + run-command builders + model registry.
+                        ModelPreset carries per-arch train/sample knobs
+                        (noise_scheduler/sample_guidance/sample_steps) so SDXL
+                        (ddpm, higher CFG) renders correctly beside the flux/qwen
+                        flow-matching presets
   user_config.py        Persist trainer install paths, last training settings, and the
                         custom captioner endpoint (URL/model/key-env-NAME/spacing) to
                         .cache/user_settings.json (no secrets; gitignored)
@@ -178,6 +190,35 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
   than raising. Caveat worth remembering: the backend *instructs* a general VLM to emit
   tags, so output approximates the vocabulary; a dedicated tagger would be needed for a
   canonical tag set (backlog).
+- **The WD tagger is a captioner backend, not a style.** `backend="wd_tagger"` runs a
+  SmilingWolf ONNX tagger that emits canonical Danbooru tags directly from image features —
+  so it *ignores* the prose/tags/e621 selector, and both `caption_images` and the UI's test
+  path force `style="tags"` for it (tag finalization). Its pure selection/formatting logic
+  (`select_tag_names`, `format_tag`) lives in `tagger.py` free of model/file I/O and is
+  unit-tested; `onnxruntime` and the huggingface download are lazy (inside `WDTagger.load`),
+  so nobody who doesn't pick a tagger pays for them. WD v3 preprocessing is exact and
+  non-obvious (white-pad to square, resize, **RGB→BGR**, float32 **0–255, no normalization**,
+  NHWC) — do not "tidy" it. Outputs are already sigmoid probabilities. Character-category
+  tags use a high default threshold (0.85) so an original character doesn't get mislabelled
+  as a known booru character.
+- **SDXL is not flow-matching.** The ai-toolkit renderer used to hardcode `noise_scheduler:
+  flowmatch` and `guidance_scale: 4`, which are correct for Flux/Qwen/Z-Image but wrong for
+  SDXL (wants `ddpm` and CFG ~7). Those three knobs now live on `ModelPreset`
+  (`noise_scheduler`/`sample_guidance`/`sample_steps`) with the old values as defaults, so
+  every existing preset renders byte-identically and only SDXL overrides them. `guidance`
+  is formatted `:g` so `4.0`→`4` (keeps the flow-matching output unchanged). As always, only
+  arch keys attested by ai-toolkit are emitted; the SDXL-family preset (Pony/Illustrious/
+  NoobAI) keeps a `<<FILL>>` model path because those checkpoints are user-local.
+- **HF publishing is opt-in and private by default.** `hf_publish.publish_dataset` never
+  runs on its own — it needs an explicit UI button click or the CLI `--publish-hf` flag.
+  `create_repo(private=True)` unless the user deliberately unchecks it; the write token comes
+  only from `HF_TOKEN` (env/.env) and is never written to disk. `normalize_repo_id` validates
+  the id (I/O-free, unit-tested) and the missing-token / missing-folder guards fail fast
+  *before* `huggingface_hub` is imported. Only files inside the dataset folder are uploaded.
+- **`zip_dataset` arcnames are derived from the folder, never absolute.** Entries are stored
+  under `<dataset-name>/…` (so it extracts tidily) and the archive is non-clobbering
+  (`-2.zip`, …) — no path-traversal surface because we only ever add files found *inside*
+  the packaged dataset dir.
 - **ComfyUI caches model combo lists**; a freshly downloaded model file may need a
   ComfyUI restart before the bundled workflows validate.
 - **Model filenames are configuration.** The bundled workflow JSONs are patched at load
@@ -239,7 +280,20 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
 
 ## Roadmap / deferred
 
-Done this revision (0.6.0):
+Done this revision (0.7.0) — market-gap backlog items 2–5, in one pass:
+
+- ✅ **Dedicated WD tagger backend (③)** — `tagger.py` + the `wd_tagger` captioner backend
+  (WD EVA02-Large / ViT v3) emit **canonical Danbooru tags** from the image, for higher tag
+  fidelity than instructing a VLM. Lazy `onnxruntime`/hub, unit-tested pure logic.
+- ✅ **Expanded trainer registry — SDXL (⑤)** — honest SDXL presets (ai-toolkit) with the
+  correct `ddpm` scheduler / CFG via new per-arch `ModelPreset` knobs; flow-matching presets
+  render unchanged. A `<<FILL>>` SDXL-family preset covers Pony / Illustrious / NoobAI.
+- ✅ **ZIP export (④)** — `package.zip_dataset()` + a UI checkbox and CLI `--zip`; tidy,
+  non-clobbering, traversal-safe archive.
+- ✅ **Hugging Face dataset publishing (④)** — `hf_publish.py` + a UI accordion and CLI
+  `--publish-hf`; opt-in, **private by default**, `HF_TOKEN` never persisted, guards tested.
+
+Done in 0.6.0:
 
 - ✅ **Tag caption styles (Danbooru + e621)** — ③ Caption (and `--caption-style` on the CLI)
   can now emit a comma-separated tag list instead of prose, matching tag-trained base models:
@@ -289,35 +343,21 @@ scrape, or bundle a heavyweight frontend. The items below are the ones that *fit
 project's shape (standalone stages, per-stage local/cloud choice, lazy heavy imports,
 honest output), prioritized by benefit-to-cost. Take from the top.
 
-1. **Tag caption styles (Danbooru + e621).** ✅ Shipped in 0.6.0 (see above). Was the
-   highest-benefit, lowest-cost item: dependency-free and unlocks the whole tag-trained
-   ecosystem (SDXL / Illustrious / NoobAI on Danbooru, Pony / furry on e621), which learns
-   poorly from prose.
-2. **Dedicated image tagger backend (③).** Add a captioner backend that runs a purpose-built
-   tagger (e.g. a WD-style ConvNeXt or JoyTag) to output canonical Danbooru/e621 tags
-   straight from image embeddings, instead of instructing a general VLM to approximate them.
-   Higher tag fidelity for the tag styles above; costs a new (optional) model dependency, so
-   it belongs as an extra backend, not a default. Natural companion to item 1.
-3. **Expanded trainer model registry (⑤).** Add honest presets for SDXL and other families
-   (Z-Image, Krea, FLUX.2). Low-risk *if* each preset only emits config keys attested in
-   that trainer's own examples (the existing `<<FILL>>` discipline applies) — inventing
-   plausible keys produces configs that fail hours into a run, so this is real work, not a
-   data-entry task. Pairs naturally with tag captions: SDXL wants both.
-4. **ZIP export option (④).** Emit the flat `NN.png/NN.txt` dataset as a single `.zip`
-   alongside (or instead of) the folder. Trivial, self-contained, convenient for uploading
-   to a cloud trainer. Good first follow-up.
-5. **Hugging Face dataset publishing (④).** Optional "publish this dataset to the Hub,
-   private by default" button after export, using `huggingface_hub`. Self-contained and
-   fits the per-stage model; gate it behind an explicit click with a clear
-   private/public + cost/ToS notice (never publish by default).
-6. **Concept & Style dataset types (②).** We are character-only; a "style" mode (no
+**Shipped** (items 1–5): tag caption styles (0.6.0); WD tagger backend, SDXL trainer
+presets, ZIP export, and HF dataset publishing (all 0.7.0 — see "Done" above). Remaining,
+still prioritized by benefit-to-cost:
+
+1. **Concept & Style dataset types (②).** We are character-only; a "style" mode (no
    isolation, prose/tags describe the aesthetic, trigger always-on) and a "concept" mode
    (object/action) are a larger shot-plan change but a genuine capability gap. Design before
    building — it touches ②'s whole shot model.
-7. **Framing/composition advisory in curate (②).** Cheap, dependency-light classification
+2. **e621-specific tagger.** The WD tagger emits Danbooru tags; a dedicated e621 tagger
+   (e.g. a Z3D/e621 ConvNeXt or JoyTag) would give canonical *furry* tags to match the e621
+   caption style. Same backend shape as `wd_tagger`, just a different model + vocabulary.
+3. **Framing/composition advisory in curate (②).** Cheap, dependency-light classification
    (face / bust / body / back, off-center) surfaced like the existing sharpness flag —
    advisory only, never blocking. Helps spot a dataset skewed to one framing.
-8. **Face-similarity identity guard (② curate).** Flag generated shots that drift from the
+4. **Face-similarity identity guard (② curate).** Flag generated shots that drift from the
    reference's identity. Genuinely useful for character LoRAs but needs a face-recognition
    dependency (InsightFace + onnxruntime); previously deferred for that reason. Revisit if
    identity drift bites users — could be an optional extra like the gated SAM3 download.
@@ -360,7 +400,14 @@ Deferred (with rationale):
 - API keys live in `.env` (gitignored; `setup.sh` chmods it 600) or the environment,
   and are only sent to their own vendor endpoints.
 - No telemetry; the only network calls are the ones the selected backends require.
-- Local model weights come from Hugging Face as safetensors.
+- **Publishing to Hugging Face is opt-in, private by default, and outbound.** It runs only on
+  an explicit button/`--publish-hf`, creates the dataset private unless the user deliberately
+  chooses public, and reads the write token only from `HF_TOKEN` (never persisted). It
+  uploads every image in the dataset folder to a remote host — the in-app notice states the
+  user is responsible for the rights to that content and for HF's terms. Once uploaded,
+  content may be cached/indexed even if later deleted.
+- Local model weights come from Hugging Face as safetensors; the WD tagger downloads an ONNX
+  model + tag CSV from a public repo (no gating). `onnxruntime` is an optional, lazy dep.
 - The ⑤ Train tab **generates and displays** config files and a run command — it never
   executes a subprocess or shell, so there is no command-injection surface. Generated
   configs reference the user's own model ids/paths; no credentials are embedded.

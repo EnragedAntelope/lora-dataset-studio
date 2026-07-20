@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -85,6 +86,29 @@ def package_dataset(
     ]
     (ds_dir / "README.txt").write_text("\n".join(readme), encoding="utf-8")
     return ds_dir
+
+
+def zip_dataset(ds_dir: Path) -> Path:
+    """Zip a packaged dataset folder into a sibling `<name>.zip` (non-clobbering).
+
+    Entries are stored under the dataset folder's own name, so it extracts into a
+    tidy folder rather than a pile of loose files. Only files inside `ds_dir` are
+    added, and arcnames are derived from `ds_dir` (never absolute), so the archive
+    has no path-traversal surface. Convenient for uploading to a cloud trainer.
+    """
+    ds_dir = Path(ds_dir)
+    if not ds_dir.is_dir():
+        raise RuntimeError(f"Not a dataset folder: {ds_dir}")
+    zip_path = ds_dir.parent / f"{ds_dir.name}.zip"
+    n = 1
+    while zip_path.exists():  # never clobber an existing archive
+        n += 1
+        zip_path = ds_dir.parent / f"{ds_dir.name}-{n}.zip"
+    files = sorted(p for p in ds_dir.rglob("*") if p.is_file())
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.write(f, arcname=f"{ds_dir.name}/{f.relative_to(ds_dir).as_posix()}")
+    return zip_path
 
 
 def package_folder(

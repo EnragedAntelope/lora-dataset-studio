@@ -42,9 +42,9 @@ Then open <http://127.0.0.1:7861>. Setup offers to store API keys in a gitignore
 | ① Restore / upscale | ComfyUI models, or basic Lanczos | — |
 | ① Subject isolation | **Built-in SAM3** (no ComfyUI) or ComfyUI SAM3 | — |
 | ② Generate shots | ComfyUI: Qwen Image Edit 2511 + Multiple-Angles LoRA | Gemini (Nano Banana) |
-| ③ Caption | Qwen3-VL-8B, JoyCaption, NSFW finetune, LM Studio / Ollama / any OpenAI-compatible endpoint | Gemini Flash, Groq free tier |
-| ④ Export | always local | — |
-| ⑤ Train config | ai-toolkit / musubi-tuner | — |
+| ③ Caption | Qwen3-VL-8B, JoyCaption, NSFW finetune, **WD taggers**, LM Studio / Ollama / any OpenAI-compatible endpoint | Gemini Flash, Groq free tier |
+| ④ Export | always local (+ optional **.zip** and **Hugging Face** publish) | — |
+| ⑤ Train config | ai-toolkit (incl. **SDXL**) / musubi-tuner | — |
 
 ## The five tabs
 
@@ -63,7 +63,9 @@ single caption first to compare captioners cheaply, and hand-edit any result inl
 
 **④ Export** — list your captioned folders, **Load & preview** to see every image with
 its caption status (✓ / empty / missing), then **uncheck** anything you don't want and
-export. You get a flat `NN.png` + `NN.txt` dataset with `metadata.json`.
+export. You get a flat `NN.png` + `NN.txt` dataset with `metadata.json`. Optionally tick
+**Also save a .zip** for a single upload-ready archive, or **publish to Hugging Face**
+(private by default) straight from the tab.
 
 **⑤ Train config** *(optional)* — inspects your dataset and writes an ai-toolkit
 `config.yaml` or musubi `dataset.toml`, with steps and buckets derived from the images you
@@ -113,6 +115,7 @@ Each subcommand is standalone; `--help` shows all options.
 | Qwen3-VL-8B Instruct *(default)* | your GPU, ~17 GB | best instruction-following, NSFW-capable |
 | JoyCaption Beta One | your GPU, ~17 GB | purpose-built diffusion captioner |
 | Qwen3-VL-8B NSFW-Caption | your GPU, ~17 GB | explicit-dataset specialist |
+| **WD EVA02-Large / ViT v3** *(tagger)* | GPU or CPU, ONNX ~0.4–1.4 GB | **canonical Danbooru tags** straight from the image — no VLM prose; needs `onnxruntime` |
 | Gemini Flash | Google API | SFW, ~$0.0007/img est., billed to your key |
 | Groq Qwen3.6 27B | Groq API | SFW, free tier, 8K TPM |
 | LM Studio / Ollama / custom | your choice | any OpenAI-compatible endpoint |
@@ -134,19 +137,22 @@ the description (prose *or* tags) covers what *varies* (pose, angle, setting, li
 not fixed appearance, because identity is what the trigger learns. Pick it on the ③ Caption
 tab, or `--caption-style prose|tags|e621` on the CLI.
 
-> **Tag accuracy:** the captioner *instructs* a general vision model to produce tags, so
-> the output approximates the vocabulary rather than matching a controlled tag set exactly
-> (JoyCaption, trained on Danbooru + e621, does best). For canonical tags, run a dedicated
-> tagger — a future option; see the backlog in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+> **Tag accuracy:** the *VLM* captioners with a tag style *instruct* a general model to
+> produce tags, so the output approximates the vocabulary rather than matching a controlled
+> tag set exactly (JoyCaption, trained on Danbooru + e621, does best). For **canonical
+> Danbooru tags**, pick a **WD tagger** captioner instead — it reads tags directly from the
+> image (needs `onnxruntime`; it ignores the prose/tags/e621 selector).
 
 ## API keys (cloud options only)
 
 - **Gemini** — image generation and/or captioning. Key: <https://aistudio.google.com/apikey>
 - **Groq** — free-tier captioning. Key: <https://console.groq.com/keys>
-- **Hugging Face** — only for built-in SAM3 isolation. `facebook/sam3` is **gated and
-  manually approved**: accept the licence on the
-  [model page](https://huggingface.co/facebook/sam3), wait for approval, then put a read
-  token in `.env` as `HF_TOKEN`. Weights (~3.4 GB) download once.
+- **Hugging Face** (`HF_TOKEN` in `.env`) — two uses:
+  - **Built-in SAM3 isolation.** `facebook/sam3` is **gated and manually approved**: accept
+    the licence on the [model page](https://huggingface.co/facebook/sam3), wait for
+    approval, then put a **read** token in `.env`. Weights (~3.4 GB) download once.
+  - **Publishing datasets to the Hub** (④, optional). Needs a **write** token. Datasets are
+    created **private by default**; you are responsible for the rights to what you upload.
 
 ## ComfyUI (optional)
 
