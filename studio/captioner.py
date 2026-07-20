@@ -109,8 +109,9 @@ class Captioner:
 
     # ---------- shared ----------
 
-    def caption(self, image_path: Path, subject: str = "the character") -> str:
-        instruction = self.spec.prompt_template.format(subject=subject)
+    def caption(self, image_path: Path, subject: str = "the character",
+                style: str = "prose") -> str:
+        instruction = self.spec.prompt_for(style).format(subject=subject)
         if self.spec.backend == "openai":
             return _clean(self._caption_openai(image_path, instruction))
         if self.spec.backend == "gemini":
@@ -274,12 +275,48 @@ class Captioner:
 def _clean(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)  # reasoning models
     text = re.sub(r"\s+", " ", text).strip()
-    text = re.sub(r"^(here is|here's|caption:|sure[,!.]?)\s*", "", text, flags=re.I)
+    text = re.sub(r"^(here is|here's|caption:|tags:|sure[,!.]?)\s*", "", text, flags=re.I)
     return text.strip().strip('"')
 
 
-def finalize_caption(raw: str, trigger: str, character_name: str, aliases: list[str]) -> str:
-    """Apply the dataset caption template: trigger first, consistent naming."""
+def _normalize_tags(text: str) -> list[str]:
+    """Split a model's tag output into a clean, deduped list.
+
+    Tolerates newline- or comma-separated tags, lowercases them, trims stray
+    punctuation, drops empties, and preserves first-seen order.
+    """
+    seen: list[str] = []
+    for chunk in re.split(r"[,\n]", text):
+        tag = re.sub(r"\s+", " ", chunk).strip().strip(".").strip().lower()
+        if tag and tag not in seen:
+            seen.append(tag)
+    return seen
+
+
+def _finalize_tags(raw: str, trigger: str) -> str:
+    """Trigger-first, comma-separated tag caption.
+
+    Identity lives in the trigger, so (unlike the prose path) the character name
+    is not injected as a tag. A trigger the model happened to emit is de-duped so
+    it appears exactly once, first, in its intended casing.
+    """
+    tags = [t for t in _normalize_tags(raw) if not (trigger and t == trigger.lower())]
+    if trigger:
+        return ", ".join([trigger, *tags]) if tags else trigger
+    return ", ".join(tags)
+
+
+def finalize_caption(raw: str, trigger: str, character_name: str, aliases: list[str],
+                     style: str = "prose") -> str:
+    """Apply the dataset caption template: trigger first, consistent naming.
+
+    `style="tags"` (Danbooru) and `style="e621"` (furry/anthro) both produce a
+    comma-separated tag caption — they differ only in the vocabulary the model
+    was asked for, not the output shape — so they share the tag finalizer. The
+    default "prose" keeps the natural-language behaviour.
+    """
+    if style in ("tags", "e621"):
+        return _finalize_tags(raw, trigger)
     caption = raw
     if character_name:
         # Replace generic nouns the VLM used for the subject with the real name
@@ -303,11 +340,13 @@ def caption_images(
     progress: Callable[[str], None] = print,
     model_override: str = "",
     spec_overrides: dict | None = None,
+    style: str = "prose",
 ) -> list[tuple[Path, str]]:
     """Caption a list of images. Standalone — no run/pipeline state needed.
 
-    Returns (image_path, finalized_caption) pairs; the captioner model is
-    loaded once and freed afterwards.
+    `style` is "prose" (natural language), "tags" (Danbooru comma list) or
+    "e621" (furry/anthro comma list). Returns (image_path, finalized_caption)
+    pairs; the captioner model is loaded once and freed afterwards.
     """
     subject = character_name or "the character"
     cap = Captioner(captioner_key, model_override=model_override,
@@ -330,8 +369,9 @@ def caption_images(
     try:
         for i, p in enumerate(images, 1):
             progress(f"Captioning {i}/{len(images)}: {p.name}")
-            raw = cap.caption(p, subject=subject)
-            items.append((p, finalize_caption(raw, trigger, character_name, SUBJECT_ALIASES)))
+            raw = cap.caption(p, subject=subject, style=style)
+            items.append(
+                (p, finalize_caption(raw, trigger, character_name, SUBJECT_ALIASES, style=style)))
     finally:
         cap.unload()
     return items
@@ -346,17 +386,19 @@ def caption_folder(
     progress: Callable[[str], None] = print,
     model_override: str = "",
     spec_overrides: dict | None = None,
+    style: str = "prose",
 ) -> list[tuple[Path, str]]:
     """Caption images in `folder` (all, or the subset in `only`) and write
     .txt sidecars next to each image. The classic 'point at a folder and tag
-    it' mode."""
+    it' mode. `style` is "prose", "tags" (Danbooru) or "e621"."""
     from studio.config import list_images
 
     images = only if only else list_images(folder)
     if not images:
         raise RuntimeError(f"No images found in {folder}")
     items = caption_images(images, captioner_key, character_name, trigger, progress,
-                           model_override=model_override, spec_overrides=spec_overrides)
+                           model_override=model_override, spec_overrides=spec_overrides,
+                           style=style)
     for img, caption in items:
         img.with_suffix(".txt").write_text(caption, encoding="utf-8")
     progress(f"Wrote {len(items)} .txt sidecar(s) in {folder}")

@@ -343,19 +343,19 @@ def save_custom_captioner(base_url: str, model: str, api_key_env: str,
 
 
 def do_test_caption(folder: str, selected: list[str], captioner_key: str,
-                    name: str, trigger: str, gemini_model: str):
+                    name: str, trigger: str, gemini_model: str, style: str):
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select at least one image first.")
     path = Path(folder.strip()) / selected[0]
     model_override, spec_overrides = _resolve_captioner_config(captioner_key, gemini_model)
     cap = Captioner(captioner_key, model_override=model_override, spec_overrides=spec_overrides)
     try:
-        raw = cap.caption(path, subject=name or "the character")
+        raw = cap.caption(path, subject=name or "the character", style=style)
     except Exception as e:
         raise gr.Error(str(e))
     finally:
         cap.unload()
-    return finalize_caption(raw, trigger, name, SUBJECT_ALIASES)
+    return finalize_caption(raw, trigger, name, SUBJECT_ALIASES, style=style)
 
 
 def load_one_caption(folder: str, filename: str) -> str:
@@ -394,8 +394,9 @@ def _merge_export_folders(existing: str, new_folder: str) -> str:
 
 
 def do_caption(folder: str, selected: list[str], captioner_key: str,
-               name: str, trigger: str, gemini_model: str, exp_folders_prev: str,
-               exp_name_prev: str, exp_trigger_prev: str, progress=gr.Progress()):
+               name: str, trigger: str, gemini_model: str, style: str,
+               exp_folders_prev: str, exp_name_prev: str, exp_trigger_prev: str,
+               progress=gr.Progress()):
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select the images to caption first.")
     base = Path(folder.strip())
@@ -409,7 +410,8 @@ def do_caption(folder: str, selected: list[str], captioner_key: str,
 
     try:
         items = caption_images(images, captioner_key, name, trigger, progress=report,
-                               model_override=model_override, spec_overrides=spec_overrides)
+                               model_override=model_override, spec_overrides=spec_overrides,
+                               style=style)
     except Exception as e:
         raise gr.Error(f"Captioning failed: {e}")
     for img, caption in items:
@@ -825,9 +827,10 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
             keep = gr.CheckboxGroup(label="✅ Kept shots — UNCHECK to reject", choices=[])
 
         with gr.Tab("③ Caption"):
-            gr.Markdown("Tag any folder of images with natural-language caption `.txt` "
-                        "sidecars — the folder does **not** need to come from ① or ②. "
-                        "Each captioner uses a prompt tuned to that model.")
+            gr.Markdown("Tag any folder of images with caption `.txt` sidecars — the folder "
+                        "does **not** need to come from ① or ②. Pick **prose** or **booru "
+                        "tags** to match your target base model. Each captioner uses a prompt "
+                        "tuned to that model.")
             with gr.Row():
                 with gr.Column(scale=1):
                     cap_folder = gr.Textbox(label="Image folder (auto-filled by ①/②)")
@@ -838,6 +841,15 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                                              placeholder="sysnootles")
                     captioner = gr.Dropdown(CAPTIONER_CHOICES, value=settings.default_captioner,
                                             label="Captioner")
+                    cap_style = gr.Radio(
+                        [("Prose — natural language (Flux, Qwen, SDXL 3, …)", "prose"),
+                         ("Danbooru tags (SDXL, Illustrious, NoobAI, …)", "tags"),
+                         ("e621 tags — furry/anthro vocab (Pony, furry checkpoints)", "e621")],
+                        value="prose", label="Caption style",
+                        info="Match your target base model: tag-trained checkpoints want "
+                             "comma-separated tags, not prose. Danbooru and e621 are different "
+                             "vocabularies — pick the one your base model was trained on. The "
+                             "trigger stays first either way.")
                     cap_cost = gr.Markdown()
                     cap_gemini_model = gr.Dropdown(
                         CAPTION_MODEL_CHOICES, value=_DEFAULT_CAPTION_MODEL,
@@ -1015,11 +1027,12 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
         [cap_custom_url, cap_custom_model, cap_custom_keyenv, cap_custom_interval],
         [cap_custom_note])
     btn_test.click(do_test_caption,
-                   [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model],
+                   [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model,
+                    cap_style],
                    [test_caption])
     btn_caption.click(
         do_caption,
-        [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model,
+        [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model, cap_style,
          exp_folders, exp_name, exp_trigger],
         [cap_gallery, cap_select, cap_result, log_box, exp_folders, exp_name, exp_trigger]) \
                .then(_editor_choices, [cap_folder], [cap_edit_file])

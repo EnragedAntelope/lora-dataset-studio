@@ -47,6 +47,14 @@ def _echo_cloud_estimate(engine: str, cloud_model: str, n_shots: int) -> None:
                    f"images (build-time estimate, billed to your Google API key).")
 
 
+def _check_caption_style(style: str) -> str:
+    """Validate the --caption-style value so a typo fails fast, not silently."""
+    style = style.strip().lower()
+    if style not in ("prose", "tags", "e621"):
+        raise typer.BadParameter("--caption-style must be 'prose', 'tags' or 'e621'.")
+    return style
+
+
 def _dress(shots: list) -> list:
     """Fill angle/pose shots with random unisex outfits (close-ups stay blank)."""
     from studio.wardrobe import OUTFIT_SHOT_KINDS, random_outfits
@@ -128,6 +136,9 @@ def caption(
     name: str = typer.Option("", help="Character name used in captions"),
     trigger: str = typer.Option("", help="Trigger word placed first in every caption"),
     model: str = typer.Option("", help="Model id (gemini captioner; blank = default)"),
+    caption_style: str = typer.Option(
+        "prose", "--caption-style",
+        help="prose (natural language), tags (Danbooru: SDXL/Illustrious) or e621 (furry/Pony)"),
 ):
     """Write .txt caption sidecars for every image in a folder (standalone).
 
@@ -140,13 +151,14 @@ def caption(
         resolve_captioner_config,
     )
 
+    style = _check_caption_style(caption_style)
     try:
         model_override, spec_overrides = resolve_captioner_config(captioner, model)
     except CaptionerConfigError as e:
         typer.echo(str(e))
         raise typer.Exit(1)
     caption_folder(folder, captioner, name, trigger, progress=typer.echo,
-                   model_override=model_override, spec_overrides=spec_overrides)
+                   model_override=model_override, spec_overrides=spec_overrides, style=style)
 
 
 @app.command()
@@ -184,6 +196,9 @@ def build(
     engine: str = typer.Option(settings.default_engine, help="gemini (cloud) or comfyui (local)"),
     captioner: str = typer.Option(settings.default_captioner,
                                   help=f"one of {list(CAPTIONERS_BY_KEY)}"),
+    caption_style: str = typer.Option(
+        "prose", "--caption-style",
+        help="prose (natural language), tags (Danbooru: SDXL/Illustrious) or e621 (furry/Pony)"),
     target: int = typer.Option(settings.target_long_side, help="Long-side resolution"),
     output_root: Path = typer.Option(settings.output_root),
     restore: bool = typer.Option(None, "--restore/--no-restore",
@@ -204,6 +219,7 @@ def build(
     from studio.captioner import caption_images
     from studio.package import package_dataset
 
+    style = _check_caption_style(caption_style)
     run_dir = pipeline.new_run_dir(name or trigger)
     typer.echo(f"Run dir: {run_dir}")
 
@@ -229,12 +245,13 @@ def build(
         raise typer.Exit(1)
 
     all_images = [r.output for r in reports] + kept
-    items = caption_images(all_images, captioner, name, trigger, progress=typer.echo)
+    items = caption_images(all_images, captioner, name, trigger, progress=typer.echo, style=style)
     metadata = {
         "character_name": name,
         "trigger": trigger,
         "engine": engine,
         "captioner": captioner,
+        "caption_style": style,
         "sources": [str(s) for s in images],
         "shots": [{"id": r.shot.id, "seed": r.seed, "error": r.error} for r in results],
     }

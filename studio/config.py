@@ -52,6 +52,70 @@ _NSFW_PROMPT = _BASE_PROMPT + (
     "directly without euphemism."
 )
 
+# --- Booru-tag caption style -------------------------------------------------
+# SDXL/Pony/Illustrious LoRAs are trained on comma-separated Danbooru-style tags,
+# not prose. These templates produce that format. Same rule as the prose ones:
+# tag what VARIES between images (pose/angle/framing/setting/lighting), not the
+# subject's fixed identity — identity is what the trigger token learns.
+_BASE_TAGS_PROMPT = (
+    "List concise Danbooru-style tags describing this image, for use as an "
+    'image-generation training caption. Refer to the main subject as "{subject}". '
+    "Output a single comma-separated list of lowercase tags (one attribute per tag) "
+    "covering the subject's pose, the camera angle and framing (e.g. from side, "
+    "from above, from behind, full body, upper body, close-up), the setting or "
+    "background, and the lighting. Do not tag the subject's fixed physical identity "
+    "in detail (it is learned separately); tag what varies between images. Do not "
+    "write sentences or commentary, and do not mention that the image is "
+    "AI-generated, a film still, or training data. Output only the comma-separated tags."
+)
+
+# JoyCaption has a documented booru-tag mode; keep its "refer to them as X"
+# convention while asking for the tag-list format.
+_JOYCAPTION_TAGS_PROMPT = (
+    "Write a list of Booru-style tags for this image. If there is a person or "
+    "character in the image you must refer to them as {subject}. Include tags for "
+    "the pose, the camera angle and framing, the setting, and the lighting, but do "
+    "not tag the subject's fixed physical appearance in detail. Output only a single "
+    "comma-separated list of lowercase tags, no sentences."
+)
+
+_NSFW_TAGS_PROMPT = _BASE_TAGS_PROMPT + (
+    " If the image contains nudity or explicit content, tag it plainly and "
+    "directly without euphemism."
+)
+
+# e621 taxonomy (furry / anthro) — the vocabulary Pony Diffusion and most furry
+# SDXL checkpoints are trained on. Same comma-list FORMAT as Danbooru but a
+# DIFFERENT controlled vocabulary (species, anthro/feral, e621 anatomy + rating
+# conventions), so it is a distinct option, not a synonym for the Danbooru one.
+# Honesty note: a general VLM only *approximates* e621's vocabulary; a dedicated
+# e621-trained tagger is the gold standard (logged in the backlog).
+_BASE_E621_PROMPT = (
+    "List concise e621-style tags describing this image, for use as an "
+    'image-generation training caption. Refer to the main subject as "{subject}". '
+    "Output a single comma-separated list of lowercase tags (one attribute per tag) "
+    "using e621 tagging conventions: include the subject's species and form "
+    "(e.g. anthro, feral, humanoid) when discernible, plus the pose, the camera "
+    "angle and framing, the setting or background, and the lighting. Do not tag the "
+    "subject's fixed physical identity in detail (it is learned separately); tag "
+    "what varies between images. Do not write sentences or commentary, and do not "
+    "mention that the image is AI-generated. Output only the comma-separated tags."
+)
+
+_JOYCAPTION_E621_PROMPT = (
+    "Write a list of e621-style tags for this image. If there is a person or "
+    "character in the image you must refer to them as {subject}. Use e621 tagging "
+    "conventions including species and form (anthro, feral, humanoid) when "
+    "discernible, plus the pose, camera angle and framing, setting, and lighting, "
+    "but do not tag the subject's fixed physical appearance in detail. Output only a "
+    "single comma-separated list of lowercase tags, no sentences."
+)
+
+_NSFW_E621_PROMPT = _BASE_E621_PROMPT + (
+    " If the image contains nudity or explicit content, tag it plainly and "
+    "directly without euphemism."
+)
+
 
 class CaptionerSpec(BaseModel):
     key: str
@@ -68,13 +132,31 @@ class CaptionerSpec(BaseModel):
     # {"reasoning_effort": "none"} to switch off a thinking model's scratchpad
     # so we get only the caption (and don't burn the token budget on reasoning).
     extra_params: dict = {}
-    prompt_template: str = _BASE_PROMPT  # must contain {subject}
+    prompt_template: str = _BASE_PROMPT  # prose style; must contain {subject}
+    # Danbooru-tag style (comma list for SDXL / Illustrious / NoobAI trainers).
+    tags_template: str = _BASE_TAGS_PROMPT  # must contain {subject}
+    # e621-tag style (comma list for Pony / furry checkpoints).
+    e621_template: str = _BASE_E621_PROMPT  # must contain {subject}
     # "qwen_vl" and "llava" share one transformers code path but need
     # different chat-template quirks (JoyCaption wants its system prompt).
     prompt_style: str = "qwen_vl"
     vram_note: str = ""
     nsfw_capable: bool = True
     cost_note: str = "free"
+
+    def prompt_for(self, style: str) -> str:
+        """The instruction template for the requested caption style.
+
+        `style="tags"` selects the Danbooru-tag template, `style="e621"` the
+        e621 (furry/anthro) one; anything else (the default "prose") selects the
+        natural-language template. Unknown styles fall back to prose so a bad
+        value never crashes captioning.
+        """
+        if style == "tags":
+            return self.tags_template
+        if style == "e621":
+            return self.e621_template
+        return self.prompt_template
 
 
 CAPTIONERS: list[CaptionerSpec] = [
@@ -90,6 +172,8 @@ CAPTIONERS: list[CaptionerSpec] = [
         hf_id="fancyfeast/llama-joycaption-beta-one-hf-llava",
         prompt_style="llava",
         prompt_template=_JOYCAPTION_PROMPT,
+        tags_template=_JOYCAPTION_TAGS_PROMPT,
+        e621_template=_JOYCAPTION_E621_PROMPT,
         vram_note="~17 GB bf16",
     ),
     CaptionerSpec(
@@ -97,6 +181,8 @@ CAPTIONERS: list[CaptionerSpec] = [
         label="Local: Qwen3-VL-8B NSFW-Caption V4.5",
         hf_id="Disty0/Qwen3-VL-8B-NSFW-Caption-V4.5",
         prompt_template=_NSFW_PROMPT,
+        tags_template=_NSFW_TAGS_PROMPT,
+        e621_template=_NSFW_E621_PROMPT,
         vram_note="~17 GB bf16",
     ),
     CaptionerSpec(

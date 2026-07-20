@@ -56,7 +56,9 @@ setting so the dataset isn't 24 versions of the same standing shot. Edit any pro
 save/load plans as reusable libraries, then generate. Uncheck rejects; blurry shots are
 flagged automatically.
 
-**③ Caption** — point at **any** folder, pick a captioner, write `.txt` sidecars. Test a
+**③ Caption** — point at **any** folder, pick a captioner, write `.txt` sidecars. Choose
+**prose**, **Danbooru tags** or **e621 tags** to match your target base model (tag-trained
+checkpoints like SDXL / Illustrious / Pony want comma-separated tags, not prose). Test a
 single caption first to compare captioners cheaply, and hand-edit any result inline.
 
 **④ Export** — list your captioned folders, **Load & preview** to see every image with
@@ -116,9 +118,26 @@ Each subcommand is standalone; `--help` shows all options.
 | LM Studio / Ollama / custom | your choice | any OpenAI-compatible endpoint |
 
 Local models download from Hugging Face on first use. Add your own in `studio/config.py`.
-Captions are `{trigger}, {description}` — the description covers what *varies* (pose,
-angle, setting, lighting), not fixed appearance, because identity is what the trigger
-learns.
+
+**Caption style** — every captioner can emit any of:
+
+- **Prose** *(default)* — one natural-language paragraph. Right for Flux, Qwen-Image,
+  SDXL 3, and most newer text-encoders.
+- **Danbooru tags** — a comma-separated tag list. Right for SDXL, Illustrious, NoobAI and
+  other Danbooru-trained checkpoints, which learn poorly from prose.
+- **e621 tags** — a comma-separated list in the furry/anthro vocabulary (species,
+  `anthro`/`feral`, e621 conventions). Right for Pony Diffusion and furry checkpoints.
+
+Danbooru and e621 are **different vocabularies**, not the same tags relabelled — pick the
+one your base model was trained on. Either way the caption is `{trigger}, {description}` —
+the description (prose *or* tags) covers what *varies* (pose, angle, setting, lighting),
+not fixed appearance, because identity is what the trigger learns. Pick it on the ③ Caption
+tab, or `--caption-style prose|tags|e621` on the CLI.
+
+> **Tag accuracy:** the captioner *instructs* a general vision model to produce tags, so
+> the output approximates the vocabulary rather than matching a controlled tag set exactly
+> (JoyCaption, trained on Danbooru + e621, does best). For canonical tags, run a dedicated
+> tagger — a future option; see the backlog in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## API keys (cloud options only)
 

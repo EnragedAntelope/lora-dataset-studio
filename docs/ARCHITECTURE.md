@@ -1,6 +1,6 @@
 # Architecture
 
-Version: 0.5.0
+Version: 0.6.0
 
 ```
 app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)
@@ -14,7 +14,10 @@ studio/
   captioner.py          Captioner backends (transformers | gemini | openai-compat),
                         caption finalization, standalone caption_folder().
                         Captioner takes model_override (Gemini model picker) and
-                        spec_overrides (runtime config for the custom endpoint)
+                        spec_overrides (runtime config for the custom endpoint).
+                        caption(style=) picks prose vs booru-tag template per spec;
+                        finalize_caption(style=) normalizes tag output (dedupe,
+                        lowercase, trigger-first)
   quality.py            Advisory sharpness check (variance of Laplacian, numpy-only)
   package.py            Dataset export (NN.png/NN.txt + metadata.json + README.txt);
                         resolve_export_items() classifies candidates by caption sidecar
@@ -161,6 +164,20 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
   time `_resolve_captioner_config` loads them into `spec_overrides`, applied with
   `CaptionerSpec.model_copy(update=...)` so the registry spec is never mutated. The same
   429-backoff + spacing path as Groq applies. The API key is read from the named env var.
+- **Caption style is prose / Danbooru tags / e621 tags, per call — not a global mode.**
+  `CaptionerSpec` carries three templates (`prompt_template` prose, `tags_template`
+  Danbooru, `e621_template` furry/anthro) and `prompt_for(style)` selects one; every backend
+  (transformers/gemini/openai) just sends the chosen instruction, so no backend-specific tag
+  logic is needed. Tags exist because Danbooru-trained (SDXL / Illustrious / NoobAI) and
+  e621-trained (Pony / furry) checkpoints learn poorly from prose — and Danbooru vs e621 are
+  **different controlled vocabularies**, hence two separate tag templates, not one. Both tag
+  styles share `finalize_caption(style in {"tags","e621"})`, which is deliberately
+  *different* from prose: it lowercases, dedupes and comma-joins (`_normalize_tags`), keeps
+  the trigger first, and does **not** inject the character name as a tag (identity is the
+  trigger). The prose path is unchanged. An unknown style value falls back to prose rather
+  than raising. Caveat worth remembering: the backend *instructs* a general VLM to emit
+  tags, so output approximates the vocabulary; a dedicated tagger would be needed for a
+  canonical tag set (backlog).
 - **ComfyUI caches model combo lists**; a freshly downloaded model file may need a
   ComfyUI restart before the bundled workflows validate.
 - **Model filenames are configuration.** The bundled workflow JSONs are patched at load
@@ -222,7 +239,16 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
 
 ## Roadmap / deferred
 
-Done this revision (0.5.0):
+Done this revision (0.6.0):
+
+- ✅ **Tag caption styles (Danbooru + e621)** — ③ Caption (and `--caption-style` on the CLI)
+  can now emit a comma-separated tag list instead of prose, matching tag-trained base models:
+  **Danbooru** for SDXL / Illustrious / NoobAI, **e621** (furry/anthro vocabulary) for Pony
+  and furry checkpoints. Per-model templates for each style (generic / JoyCaption / NSFW),
+  shared tag normalization (dedupe, lowercase, trigger-first, name-not-injected), UI radio,
+  CLI flag with validation, and unit tests. Prose remains the default and is unchanged.
+
+Done in 0.5.0:
 
 - ✅ **Final export selection gate** — ④ gains "Load & preview" → gallery + all-checked
   `CheckboxGroup` (UNCHECK-to-drop, matching ②/③); export packages only checked images.
@@ -252,6 +278,54 @@ Done in 0.3.0:
 - ✅ Sharpness quality flag before export (advisory Laplacian-variance).
 - ✅ Bulk/inline caption editor in the UI (edit any `.txt` sidecar by hand).
 - ✅ User-editable prompt libraries — save/load shot plans as YAML.
+
+### Market-gap backlog
+
+Scan of the broader LoRA-dataset-tooling space (some tools go much further and also
+orchestrate *training* — cloud GPU rental, checkpoint-comparison studios, model merging,
+web scraping, face-recognition curation). Most of that is out of scope for this tool by
+design — we deliberately generate and display trainer configs and never launch training,
+scrape, or bundle a heavyweight frontend. The items below are the ones that *fit* this
+project's shape (standalone stages, per-stage local/cloud choice, lazy heavy imports,
+honest output), prioritized by benefit-to-cost. Take from the top.
+
+1. **Tag caption styles (Danbooru + e621).** ✅ Shipped in 0.6.0 (see above). Was the
+   highest-benefit, lowest-cost item: dependency-free and unlocks the whole tag-trained
+   ecosystem (SDXL / Illustrious / NoobAI on Danbooru, Pony / furry on e621), which learns
+   poorly from prose.
+2. **Dedicated image tagger backend (③).** Add a captioner backend that runs a purpose-built
+   tagger (e.g. a WD-style ConvNeXt or JoyTag) to output canonical Danbooru/e621 tags
+   straight from image embeddings, instead of instructing a general VLM to approximate them.
+   Higher tag fidelity for the tag styles above; costs a new (optional) model dependency, so
+   it belongs as an extra backend, not a default. Natural companion to item 1.
+3. **Expanded trainer model registry (⑤).** Add honest presets for SDXL and other families
+   (Z-Image, Krea, FLUX.2). Low-risk *if* each preset only emits config keys attested in
+   that trainer's own examples (the existing `<<FILL>>` discipline applies) — inventing
+   plausible keys produces configs that fail hours into a run, so this is real work, not a
+   data-entry task. Pairs naturally with tag captions: SDXL wants both.
+4. **ZIP export option (④).** Emit the flat `NN.png/NN.txt` dataset as a single `.zip`
+   alongside (or instead of) the folder. Trivial, self-contained, convenient for uploading
+   to a cloud trainer. Good first follow-up.
+5. **Hugging Face dataset publishing (④).** Optional "publish this dataset to the Hub,
+   private by default" button after export, using `huggingface_hub`. Self-contained and
+   fits the per-stage model; gate it behind an explicit click with a clear
+   private/public + cost/ToS notice (never publish by default).
+6. **Concept & Style dataset types (②).** We are character-only; a "style" mode (no
+   isolation, prose/tags describe the aesthetic, trigger always-on) and a "concept" mode
+   (object/action) are a larger shot-plan change but a genuine capability gap. Design before
+   building — it touches ②'s whole shot model.
+7. **Framing/composition advisory in curate (②).** Cheap, dependency-light classification
+   (face / bust / body / back, off-center) surfaced like the existing sharpness flag —
+   advisory only, never blocking. Helps spot a dataset skewed to one framing.
+8. **Face-similarity identity guard (② curate).** Flag generated shots that drift from the
+   reference's identity. Genuinely useful for character LoRAs but needs a face-recognition
+   dependency (InsightFace + onnxruntime); previously deferred for that reason. Revisit if
+   identity drift bites users — could be an optional extra like the gated SAM3 download.
+
+**Explicitly not pursuing** (conflict with this project's scope): in-app training launch /
+cloud GPU rental, Test Studio / checkpoint ranking, Merge Lab, and web scraping. The
+first three are the "never launch training" line we hold deliberately (see Deferred); web
+scraping carries rights/ToS liability we don't want to put one click away.
 
 Deferred (with rationale):
 
