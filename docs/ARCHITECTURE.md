@@ -362,6 +362,34 @@ still prioritized by benefit-to-cost:
    dependency (InsightFace + onnxruntime); previously deferred for that reason. Revisit if
    identity drift bites users — could be an optional extra like the gated SAM3 download.
 
+### Further ideas identified (0.7.0 review)
+
+Newer candidates that fit the project's shape, surfaced while building items 2–5. Mostly
+small, high-leverage follow-ups to what just shipped — not yet prioritized against the four
+above, but recorded so they aren't lost.
+
+- **Caption prefix/suffix — quality/score tags (③/④).** Now that tag captions exist, let the
+  user set a fixed prefix/suffix applied after the trigger — Pony wants `score_9,
+  score_8_up, …`, Danbooru boorus want `masterpiece, best quality`. Cheap; high value for the
+  tag ecosystem we just enabled. Applies at caption time or as an export transform.
+- **WD tagger threshold controls in the UI (③).** Expose the general/character thresholds
+  (fixed at 0.35 / 0.85 today) so users can tune tag density. Small, natural follow-up to the
+  tagger backend — the plumbing (`CaptionerSpec.general_threshold/character_threshold`) is
+  already there.
+- **Near-duplicate advisory at export (④).** A perceptual-hash (dHash, numpy-only) flag for
+  near-identical images, surfaced like the sharpness advisory — advisory only, never
+  auto-dropping. Dependency-light; catches an over-weighted duplicate before packaging.
+- **HF `metadata.jsonl` in the export (④).** Also write the HuggingFace `imagefolder`
+  metadata (one `{"file_name": …, "text": …}` line per image) so the exported/published
+  dataset loads directly via `datasets.load_dataset("imagefolder", …)`. Trivial; complements
+  the new HF publishing.
+- **kohya-ss sd-scripts trainer target (⑤).** SDXL LoRAs are most often trained with kohya
+  `sd-scripts`, not ai-toolkit or musubi. Adding it as a third trainer would make the new
+  SDXL preset genuinely one-command for the common case. Real work + must be verified against
+  sd-scripts' args (honest `<<FILL>>` where unsure), so a backlog item, not a quick win.
+- **"Skip already-captioned" toggle (③).** Option to skip images that already have a
+  non-empty `.txt` instead of overwriting — QoL when iterating captions on a large set.
+
 **Explicitly not pursuing** (conflict with this project's scope): in-app training launch /
 cloud GPU rental, Test Studio / checkpoint ranking, Merge Lab, and web scraping. The
 first three are the "never launch training" line we hold deliberately (see Deferred); web

@@ -68,8 +68,9 @@ export. You get a flat `NN.png` + `NN.txt` dataset with `metadata.json`. Optiona
 (private by default) straight from the tab.
 
 **⑤ Train config** *(optional)* — inspects your dataset and writes an ai-toolkit
-`config.yaml` or musubi `dataset.toml`, with steps and buckets derived from the images you
-actually have. **Nothing is launched** — you get the config and the run command.
+`config.yaml` (Flux, Qwen-Image, **SDXL**, …) or musubi `dataset.toml`, with steps and
+buckets derived from the images you actually have. **Nothing is launched** — you get the
+config and the run command.
 
 ![Caption tab](docs/images/ui-caption.png)
 
@@ -101,12 +102,15 @@ and your LoRA thinks the backpack *is* the character. Two defences:
 ```bash
 python cli.py preprocess ./sources --out ./prepped
 python cli.py generate ./prepped --name "Sy Snootles" --engine comfyui --randomize-outfits
-python cli.py caption ./any/folder --trigger sysnootles     # writes .txt sidecars
-python cli.py export ./prepped ./generated --name "Sy Snootles" --trigger sysnootles
+python cli.py caption ./any/folder --trigger sysnootles                 # prose .txt sidecars
+python cli.py caption ./any/folder --trigger sysnootles --caption-style tags   # Danbooru tags
+python cli.py caption ./any/folder --trigger sysnootles --captioner wd-eva02   # WD tagger
+python cli.py export ./prepped ./generated --name "Sy Snootles" --trigger sysnootles --zip
+python cli.py export ./ds --name "Sy" --publish-hf my-character-lora    # HF, private by default
 python cli.py build source.png --name "Sy Snootles" --trigger sysnootles   # all four
 ```
 
-Each subcommand is standalone; `--help` shows all options.
+Each subcommand is standalone; `--help` shows all options (caption style, ZIP, HF publish, …).
 
 ## Captioners
 
