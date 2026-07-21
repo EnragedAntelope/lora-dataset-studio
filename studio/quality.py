@@ -1,9 +1,14 @@
 """Advisory image-quality checks.
 
-Currently a single, cheap sharpness estimate (variance of the Laplacian) used to
-flag blurry shots in the curate/export views. It is deliberately advisory: it
-labels images, it never deletes or blocks them. numpy-only — no cv2/scipy — so
-it adds no heavy dependency.
+Cheap, numpy-only estimates used to *label* shots in the curate/export views —
+never to delete or block them:
+
+- **sharpness** (variance of the Laplacian) -> "blurry"
+- **exposure/contrast** (mean and spread of luminance) -> "dark"/"bright"/"low contrast"
+
+These are honest heuristics, not a semantic framing model: they catch the common
+"something's off with this shot" cases without a heavy dependency. Semantic
+framing (face/bust/body/back) would need a detector and is intentionally left out.
 """
 
 from __future__ import annotations
@@ -47,3 +52,27 @@ def is_blurry(path: Path, threshold: float | None = None) -> tuple[bool, float]:
     thr = settings.sharpness_blur_threshold if threshold is None else threshold
     score = sharpness(path)
     return score < thr, score
+
+
+def exposure(path: Path) -> tuple[float, float]:
+    """(mean luminance, luminance std) on 0-255. Low mean = dark, low std = flat."""
+    with Image.open(path) as im:
+        gray = np.asarray(im.convert("L"), dtype=np.float64)
+    return float(gray.mean()), float(gray.std())
+
+
+def composition_flags(path: Path) -> list[str]:
+    """Advisory exposure/contrast labels for a shot (empty = nothing notable).
+
+    Thresholds are tunable via `LDS_DARK_LUMA_THRESHOLD` / `LDS_BRIGHT_LUMA_
+    THRESHOLD` / `LDS_LOW_CONTRAST_THRESHOLD`.
+    """
+    mean, std = exposure(path)
+    flags: list[str] = []
+    if mean <= settings.dark_luma_threshold:
+        flags.append("dark")
+    elif mean >= settings.bright_luma_threshold:
+        flags.append("bright")
+    if std <= settings.low_contrast_threshold:
+        flags.append("low contrast")
+    return flags

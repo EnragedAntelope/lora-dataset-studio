@@ -42,3 +42,18 @@ def test_zip_dataset_rejects_non_folder(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError):
         zip_dataset(tmp_path / "does-not-exist")
+
+
+def test_package_dataset_writes_hf_metadata_jsonl(tmp_path: Path) -> None:
+    import json
+
+    from PIL import Image
+
+    from studio.package import package_dataset
+
+    src = tmp_path / "src.png"
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(src)
+    ds = package_dataset([(src, "trig, standing outdoors")], tmp_path / "out",
+                         "Sy", "trig", {})
+    lines = (ds / "metadata.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert json.loads(lines[0]) == {"file_name": "01.png", "text": "trig, standing outdoors"}

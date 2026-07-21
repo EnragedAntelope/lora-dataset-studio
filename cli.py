@@ -139,6 +139,12 @@ def caption(
     caption_style: str = typer.Option(
         "prose", "--caption-style",
         help="prose (natural language), tags (Danbooru: SDXL/Illustrious) or e621 (furry/Pony)"),
+    prefix: str = typer.Option(
+        "", help="Fixed text added before every caption (e.g. Pony 'score_9, score_8_up')"),
+    suffix: str = typer.Option("", help="Fixed text added after every caption"),
+    skip_captioned: bool = typer.Option(
+        False, "--skip-captioned",
+        help="Leave images that already have a non-empty .txt caption untouched"),
 ):
     """Write .txt caption sidecars for every image in a folder (standalone).
 
@@ -158,7 +164,8 @@ def caption(
         typer.echo(str(e))
         raise typer.Exit(1)
     caption_folder(folder, captioner, name, trigger, progress=typer.echo,
-                   model_override=model_override, spec_overrides=spec_overrides, style=style)
+                   model_override=model_override, spec_overrides=spec_overrides, style=style,
+                   prefix=prefix, suffix=suffix, skip_existing=skip_captioned)
 
 
 @app.command()
@@ -234,6 +241,9 @@ def build(
     randomize_outfits: bool = typer.Option(
         False, help="Dress angle/pose shots in random unisex outfits"),
     zip_: bool = typer.Option(False, "--zip", help="Also write a .zip of the dataset"),
+    prefix: str = typer.Option(
+        "", help="Fixed text added before every caption (e.g. Pony 'score_9, score_8_up')"),
+    suffix: str = typer.Option("", help="Fixed text added after every caption"),
 ):
     """Full pipeline: preprocess -> generate -> caption -> export."""
     from studio.captioner import caption_images
@@ -265,7 +275,8 @@ def build(
         raise typer.Exit(1)
 
     all_images = [r.output for r in reports] + kept
-    items = caption_images(all_images, captioner, name, trigger, progress=typer.echo, style=style)
+    items = caption_images(all_images, captioner, name, trigger, progress=typer.echo,
+                           style=style, prefix=prefix, suffix=suffix)
     metadata = {
         "character_name": name,
         "trigger": trigger,

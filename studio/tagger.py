@@ -1,17 +1,22 @@
-"""Dedicated image-tagger backend (SmilingWolf WD v3, ONNX).
+"""Dedicated image-tagger backend (ONNX booru taggers).
 
 Where the VLM captioners *instruct* a general model to approximate booru tags,
-this runs a purpose-built tagger that emits **canonical Danbooru tags** straight
-from image features — higher tag fidelity for SDXL / Illustrious / NoobAI
-datasets. It is exposed as a captioner backend (`backend="wd_tagger"`), so it
-plugs into the same ③ Caption flow as everything else.
+this runs a purpose-built tagger that emits **canonical tags** straight from
+image features — higher tag fidelity for tag-trained checkpoints. Two vocabularies
+are supported through one code path:
 
-Heavy, optional deps (`onnxruntime`, `huggingface_hub`) are imported lazily
-inside `WDTagger.load()`, so nobody who doesn't pick a tagger pays for them.
+- **Danbooru** — SmilingWolf WD v3 (`selected_tags.csv`), for SDXL / Illustrious /
+  NoobAI.
+- **e621** — Z3D-E621-ConvNeXt (`tags-selected.csv`), for Pony / furry checkpoints.
 
-The pure selection/formatting logic (`select_tag_names`, `format_tag`) is kept
-free of any model or file I/O so it can be unit-tested without downloading a
-1 GB model or running inference.
+They share preprocessing and the CSV columns we read (`name`, `category`); only
+the tag file name and the meaning of the category ids differ, captured in
+`SCHEMES`. Exposed as the "wd_tagger" captioner backend.
+
+Heavy, optional deps (`onnxruntime`, `huggingface_hub`) are imported lazily inside
+`Tagger.load()`. The pure selection/formatting logic (`select_tag_names`,
+`format_tag`) is free of any model or file I/O so it can be unit-tested without a
+download or inference.
 """
 
 from __future__ import annotations
@@ -19,10 +24,18 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-# Danbooru tag categories as stored in a WD tagger's selected_tags.csv.
-CATEGORY_GENERAL = 0
-CATEGORY_CHARACTER = 4
-CATEGORY_RATING = 9
+# Category-id sets per tagging scheme. A tagger's tag CSV stores a numeric
+# category per tag; the meaning differs between Danbooru and e621. Tags whose
+# category is in neither set (Danbooru ratings; e621 meta/invalid) are dropped.
+SCHEMES = {
+    # Danbooru (WD taggers): 0=general, 4=character, 9=rating.
+    "danbooru": {"general": frozenset({0}), "character": frozenset({4})},
+    # e621 (Z3D): 0=general, 1=artist, 3=copyright, 4=character, 5=species,
+    # 7=meta, 8=lore. Species reads like a general descriptor for training, so it
+    # rides the general threshold; artist/copyright/character/lore are specific
+    # labels held to the higher character threshold; meta/invalid are dropped.
+    "e621": {"general": frozenset({0, 5}), "character": frozenset({1, 3, 4, 8})},
+}
 
 # Tags that are literally kaomoji — underscores are part of the face, so they
 # must NOT be turned into spaces the way an ordinary tag ("long_hair") is.
@@ -33,7 +46,7 @@ _KAOMOJI = {
 
 
 def format_tag(name: str) -> str:
-    """Danbooru raw tag -> caption form: underscores become spaces (kaomoji kept)."""
+    """Raw booru tag -> caption form: underscores become spaces (kaomoji kept)."""
     return name if name in _KAOMOJI else name.replace("_", " ")
 
 
@@ -41,38 +54,38 @@ def select_tag_names(
     labels: list[tuple[str, int, float]],
     general_threshold: float,
     character_threshold: float,
-    include_ratings: bool = False,
+    scheme: str = "danbooru",
 ) -> list[str]:
     """Pick tag names above threshold, ordered general-then-character by confidence.
 
-    `labels` is (name, category, probability). General and character tags use
-    separate thresholds (character tags are specific existing-character names, so
-    they need a high bar). Rating tags (safe/questionable/explicit) are dropped
-    unless `include_ratings`, in which case only the single most-likely rating is
-    appended. Pure function: no model, no I/O — this is the unit-tested seam.
+    `labels` is (name, category, probability). General-category tags use
+    `general_threshold`; specific-label categories (character/artist/copyright…)
+    use the higher `character_threshold` so an original subject isn't mislabelled
+    as a known character. Categories outside the scheme (ratings, meta, invalid)
+    are dropped. Pure function: no model, no I/O — this is the unit-tested seam.
     """
+    cats = SCHEMES.get(scheme, SCHEMES["danbooru"])
     general: list[tuple[str, float]] = []
     character: list[tuple[str, float]] = []
-    ratings: list[tuple[str, float]] = []
     for name, category, prob in labels:
-        if category == CATEGORY_RATING:
-            ratings.append((name, prob))
-        elif category == CATEGORY_CHARACTER:
+        if category in cats["general"]:
+            if prob >= general_threshold:
+                general.append((name, prob))
+        elif category in cats["character"]:
             if prob >= character_threshold:
                 character.append((name, prob))
-        elif prob >= general_threshold:
-            general.append((name, prob))
-
     general.sort(key=lambda x: x[1], reverse=True)
     character.sort(key=lambda x: x[1], reverse=True)
-    names = [n for n, _ in general] + [n for n, _ in character]
-    if include_ratings and ratings:
-        names.append(max(ratings, key=lambda x: x[1])[0])
-    return names
+    return [n for n, _ in general] + [n for n, _ in character]
 
 
 def _read_selected_tags(csv_path: Path) -> tuple[list[str], list[int]]:
-    """Parse a WD tagger's selected_tags.csv -> (tag names, category ids)."""
+    """Parse a tagger's tag CSV -> (tag names, category ids).
+
+    Handles both the WD (`tag_id,name,category,count`) and Z3D
+    (`id,name,category,post_count`) layouts — we only read `name` and `category`,
+    which both share.
+    """
     names: list[str] = []
     categories: list[int] = []
     with csv_path.open(encoding="utf-8", newline="") as fh:
@@ -85,22 +98,24 @@ def _read_selected_tags(csv_path: Path) -> tuple[list[str], list[int]]:
     return names, categories
 
 
-class WDTagger:
-    """A SmilingWolf WD v3 ONNX tagger, loaded on demand from Hugging Face.
+class Tagger:
+    """An ONNX booru tagger, loaded on demand from Hugging Face.
 
-    `hf_id` is the model repo (e.g. 'SmilingWolf/wd-eva02-large-tagger-v3');
-    the model.onnx and selected_tags.csv are downloaded and cached by
+    `hf_id` is the model repo; `tags_file` and `scheme` select the vocabulary
+    (Danbooru WD vs e621 Z3D). The model + tag CSV are downloaded and cached by
     huggingface_hub on first use.
     """
 
     MODEL_FILE = "model.onnx"
-    TAGS_FILE = "selected_tags.csv"
 
     def __init__(self, hf_id: str, general_threshold: float = 0.35,
-                 character_threshold: float = 0.85) -> None:
+                 character_threshold: float = 0.85,
+                 tags_file: str = "selected_tags.csv", scheme: str = "danbooru") -> None:
         self.hf_id = hf_id
         self.general_threshold = general_threshold
         self.character_threshold = character_threshold
+        self.tags_file = tags_file
+        self.scheme = scheme
         self._session = None
         self._tag_names: list[str] = []
         self._categories: list[int] = []
@@ -113,25 +128,24 @@ class WDTagger:
             import onnxruntime as ort
         except ImportError as e:  # optional dep — only taggers need it
             raise RuntimeError(
-                "The WD tagger needs onnxruntime. Install it with "
+                "The tagger backend needs onnxruntime. Install it with "
                 "`pip install onnxruntime` (or onnxruntime-gpu for CUDA)."
             ) from e
         from huggingface_hub import hf_hub_download
 
         model_path = hf_hub_download(self.hf_id, self.MODEL_FILE)
-        tags_path = hf_hub_download(self.hf_id, self.TAGS_FILE)
+        tags_path = hf_hub_download(self.hf_id, self.tags_file)
         self._tag_names, self._categories = _read_selected_tags(Path(tags_path))
-        # Prefer CUDA if the GPU build is present; always fall back to CPU.
         providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider")
                      if p in ort.get_available_providers()]
         self._session = ort.InferenceSession(model_path, providers=providers)
-        # WD v3 models take NHWC input; the spatial size is the 2nd axis.
+        # WD/Z3D models take NHWC input; the spatial size is the 2nd axis.
         shape = self._session.get_inputs()[0].shape
         if isinstance(shape[1], int):
             self._target_size = shape[1]
 
     def _preprocess(self, image_path: Path):
-        """SmilingWolf's recipe: white-pad to square, resize, RGB->BGR, float32 0-255."""
+        """White-pad to square, resize, RGB->BGR, float32 0-255 (the WD/Z3D recipe)."""
         import numpy as np
         from PIL import Image
 
@@ -156,7 +170,8 @@ class WDTagger:
         preds = self._session.run(None, inputs)[0][0]  # already sigmoid probs
         labels = [(self._tag_names[i], self._categories[i], float(preds[i]))
                   for i in range(len(self._tag_names))]
-        names = select_tag_names(labels, self.general_threshold, self.character_threshold)
+        names = select_tag_names(labels, self.general_threshold,
+                                 self.character_threshold, self.scheme)
         return [format_tag(n) for n in names]
 
     def unload(self) -> None:

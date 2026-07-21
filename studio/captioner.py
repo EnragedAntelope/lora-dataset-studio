@@ -131,10 +131,11 @@ class Captioner:
 
     def _load_tagger(self):
         if self._tagger is None:
-            from studio.tagger import WDTagger
+            from studio.tagger import Tagger
 
-            self._tagger = WDTagger(self.spec.hf_id, self.spec.general_threshold,
-                                    self.spec.character_threshold)
+            self._tagger = Tagger(self.spec.hf_id, self.spec.general_threshold,
+                                  self.spec.character_threshold,
+                                  self.spec.tags_file, self.spec.tag_scheme)
         self._tagger.load()
         return self._tagger
 
@@ -325,6 +326,27 @@ def _finalize_tags(raw: str, trigger: str) -> str:
     return ", ".join(tags)
 
 
+def apply_affixes(caption: str, prefix: str, suffix: str, style: str) -> str:
+    """Wrap a finalized caption with fixed prefix/suffix text.
+
+    Mainly for tag datasets — e.g. Pony's `score_9, score_8_up, …` quality prefix
+    or a `masterpiece, best quality` Danbooru prefix — so those constant tags ride
+    on every caption without re-tagging. Joined with a comma for tag styles (they
+    ARE tags) and a space for prose; empty prefix/suffix are no-ops.
+    """
+    prefix, suffix = prefix.strip().strip(","), suffix.strip().strip(",")
+    if not prefix and not suffix:
+        return caption
+    sep = ", " if style in ("tags", "e621") else " "
+    return sep.join(p for p in (prefix, caption, suffix) if p)
+
+
+def _has_caption(image: Path) -> bool:
+    """True if the image already has a non-empty .txt sidecar."""
+    txt = image.with_suffix(".txt")
+    return txt.exists() and bool(txt.read_text(encoding="utf-8").strip())
+
+
 def finalize_caption(raw: str, trigger: str, character_name: str, aliases: list[str],
                      style: str = "prose") -> str:
     """Apply the dataset caption template: trigger first, consistent naming.
@@ -360,14 +382,28 @@ def caption_images(
     model_override: str = "",
     spec_overrides: dict | None = None,
     style: str = "prose",
+    prefix: str = "",
+    suffix: str = "",
+    skip_existing: bool = False,
 ) -> list[tuple[Path, str]]:
     """Caption a list of images. Standalone — no run/pipeline state needed.
 
     `style` is "prose" (natural language), "tags" (Danbooru comma list) or
-    "e621" (furry/anthro comma list). Returns (image_path, finalized_caption)
-    pairs; the captioner model is loaded once and freed afterwards.
+    "e621" (furry/anthro comma list). `prefix`/`suffix` wrap every caption (for
+    quality/score tags); `skip_existing` leaves images that already have a
+    non-empty .txt untouched. Returns (image_path, finalized_caption) pairs; the
+    captioner model is loaded once and freed afterwards.
     """
     subject = character_name or "the character"
+    if skip_existing:
+        kept = [p for p in images if not _has_caption(p)]
+        if len(kept) != len(images):
+            progress(f"Skipping {len(images) - len(kept)} image(s) that already "
+                     f"have a caption.")
+        images = kept
+    if not images:
+        progress("Nothing to caption.")
+        return []
     cap = Captioner(captioner_key, model_override=model_override,
                     spec_overrides=spec_overrides)
     # A dedicated tagger always emits Danbooru tags, whatever `style` requested.
@@ -394,8 +430,9 @@ def caption_images(
         for i, p in enumerate(images, 1):
             progress(f"Captioning {i}/{len(images)}: {p.name}")
             raw = cap.caption(p, subject=subject, style=style)
-            items.append(
-                (p, finalize_caption(raw, trigger, character_name, SUBJECT_ALIASES, style=style)))
+            cap_text = finalize_caption(raw, trigger, character_name, SUBJECT_ALIASES,
+                                        style=style)
+            items.append((p, apply_affixes(cap_text, prefix, suffix, style)))
     finally:
         cap.unload()
     return items
@@ -411,10 +448,14 @@ def caption_folder(
     model_override: str = "",
     spec_overrides: dict | None = None,
     style: str = "prose",
+    prefix: str = "",
+    suffix: str = "",
+    skip_existing: bool = False,
 ) -> list[tuple[Path, str]]:
     """Caption images in `folder` (all, or the subset in `only`) and write
     .txt sidecars next to each image. The classic 'point at a folder and tag
-    it' mode. `style` is "prose", "tags" (Danbooru) or "e621"."""
+    it' mode. `style` is "prose", "tags" (Danbooru) or "e621"; `prefix`/`suffix`
+    wrap every caption; `skip_existing` leaves already-captioned images alone."""
     from studio.config import list_images
 
     images = only if only else list_images(folder)
@@ -422,7 +463,8 @@ def caption_folder(
         raise RuntimeError(f"No images found in {folder}")
     items = caption_images(images, captioner_key, character_name, trigger, progress,
                            model_override=model_override, spec_overrides=spec_overrides,
-                           style=style)
+                           style=style, prefix=prefix, suffix=suffix,
+                           skip_existing=skip_existing)
     for img, caption in items:
         img.with_suffix(".txt").write_text(caption, encoding="utf-8")
     progress(f"Wrote {len(items)} .txt sidecar(s) in {folder}")

@@ -1,4 +1,4 @@
-"""Tests for the WD tagger backend (pure logic + glue, no ONNX/download)."""
+"""Tests for the ONNX tagger backend (pure logic + glue, no ONNX/download)."""
 
 from __future__ import annotations
 
@@ -7,10 +7,7 @@ from pathlib import Path
 from studio.captioner import Captioner
 from studio.config import CAPTIONERS_BY_KEY
 from studio.tagger import (
-    CATEGORY_CHARACTER,
-    CATEGORY_GENERAL,
-    CATEGORY_RATING,
-    WDTagger,
+    Tagger,
     _read_selected_tags,
     format_tag,
     select_tag_names,
@@ -19,28 +16,30 @@ from studio.tagger import (
 
 # ---------- pure selection / formatting ----------
 
-def test_select_tag_names_thresholds_and_order() -> None:
+def test_select_tag_names_danbooru_thresholds_and_order() -> None:
     labels = [
-        ("long_hair", CATEGORY_GENERAL, 0.9),
-        ("smile", CATEGORY_GENERAL, 0.5),
-        ("blurry", CATEGORY_GENERAL, 0.1),        # below general threshold
-        ("hatsune_miku", CATEGORY_CHARACTER, 0.95),
-        ("some_char", CATEGORY_CHARACTER, 0.5),   # below character threshold
-        ("explicit", CATEGORY_RATING, 0.8),       # ratings dropped by default
+        ("long_hair", 0, 0.9),        # general
+        ("smile", 0, 0.5),            # general
+        ("blurry", 0, 0.1),           # general, below threshold
+        ("hatsune_miku", 4, 0.95),    # character
+        ("some_char", 4, 0.5),        # character, below threshold
+        ("explicit", 9, 0.8),         # rating -> dropped
     ]
-    out = select_tag_names(labels, general_threshold=0.35, character_threshold=0.85)
-    # General (by confidence desc) then character; ratings excluded.
+    out = select_tag_names(labels, 0.35, 0.85, scheme="danbooru")
     assert out == ["long_hair", "smile", "hatsune_miku"]
 
 
-def test_select_tag_names_can_include_top_rating() -> None:
+def test_select_tag_names_e621_species_is_general() -> None:
     labels = [
-        ("safe", CATEGORY_RATING, 0.2),
-        ("explicit", CATEGORY_RATING, 0.7),
-        ("solo", CATEGORY_GENERAL, 0.9),
+        ("wolf", 5, 0.9),        # species -> general threshold in e621
+        ("solo", 0, 0.8),        # general
+        ("jay_naylor", 1, 0.95),  # artist -> character threshold
+        ("meta_tag", 7, 0.99),   # meta -> dropped
+        ("faint_species", 5, 0.2),  # species below general threshold
     ]
-    out = select_tag_names(labels, 0.35, 0.85, include_ratings=True)
-    assert out == ["solo", "explicit"]  # only the most-likely rating appended
+    out = select_tag_names(labels, 0.35, 0.85, scheme="e621")
+    # general(+species) by confidence, then character-like (artist); meta dropped.
+    assert out == ["wolf", "solo", "jay_naylor"]
 
 
 def test_format_tag_underscores_to_spaces_but_keeps_kaomoji() -> None:
@@ -48,24 +47,33 @@ def test_format_tag_underscores_to_spaces_but_keeps_kaomoji() -> None:
     assert format_tag("^_^") == "^_^"
 
 
-def test_read_selected_tags(tmp_path: Path) -> None:
-    csv_path = tmp_path / "selected_tags.csv"
-    csv_path.write_text(
-        "tag_id,name,category,count\n1,long_hair,0,100\n2,miku,4,50\n",
-        encoding="utf-8")
-    names, cats = _read_selected_tags(csv_path)
-    assert names == ["long_hair", "miku"]
-    assert cats == [0, 4]
+def test_read_selected_tags_handles_both_csv_layouts(tmp_path: Path) -> None:
+    wd = tmp_path / "selected_tags.csv"
+    wd.write_text("tag_id,name,category,count\n1,long_hair,0,100\n2,miku,4,50\n",
+                  encoding="utf-8")
+    z3d = tmp_path / "tags-selected.csv"
+    z3d.write_text("id,name,category,post_count\n1,wolf,5,999\n2,solo,0,888\n",
+                   encoding="utf-8")
+    assert _read_selected_tags(wd) == (["long_hair", "miku"], [0, 4])
+    assert _read_selected_tags(z3d) == (["wolf", "solo"], [5, 0])
 
 
 # ---------- registry ----------
 
-def test_wd_tagger_specs_registered() -> None:
+def test_tagger_specs_registered() -> None:
     for key in ("wd-eva02", "wd-vit"):
         spec = CAPTIONERS_BY_KEY[key]
         assert spec.backend == "wd_tagger"
         assert spec.hf_id.startswith("SmilingWolf/")
-        assert spec.nsfw_capable  # WD taggers include explicit tags
+        assert spec.tag_scheme == "danbooru"
+
+
+def test_e621_tagger_spec_registered() -> None:
+    spec = CAPTIONERS_BY_KEY["z3d-e621"]
+    assert spec.backend == "wd_tagger"
+    assert spec.hf_id == "toynya/Z3D-E621-Convnext"
+    assert spec.tags_file == "tags-selected.csv"
+    assert spec.tag_scheme == "e621"
 
 
 # ---------- glue (fake session, no onnxruntime import) ----------
@@ -86,14 +94,13 @@ class _FakeSession:
         return [[self._preds]]  # shape (1, n_tags)
 
 
-def test_wdtagger_tag_pipeline(monkeypatch) -> None:
-    wd = WDTagger("fake/repo")
-    # Pre-seed the session so .load() short-circuits (never imports onnxruntime).
-    wd._session = _FakeSession([0.9, 0.5, 0.95, 0.1])
-    wd._tag_names = ["long_hair", "smile", "hatsune_miku", "blurry"]
-    wd._categories = [0, 0, 4, 0]
-    monkeypatch.setattr(wd, "_preprocess", lambda _p: None)
-    assert wd.tag(Path("x.png")) == ["long hair", "smile", "hatsune miku"]
+def test_tagger_tag_pipeline(monkeypatch) -> None:
+    tg = Tagger("fake/repo")
+    tg._session = _FakeSession([0.9, 0.5, 0.95, 0.1])  # short-circuits load()
+    tg._tag_names = ["long_hair", "smile", "hatsune_miku", "blurry"]
+    tg._categories = [0, 0, 4, 0]
+    monkeypatch.setattr(tg, "_preprocess", lambda _p: None)
+    assert tg.tag(Path("x.png")) == ["long hair", "smile", "hatsune miku"]
 
 
 def test_captioner_wd_tagger_returns_joined_tags(monkeypatch) -> None:
@@ -104,5 +111,4 @@ def test_captioner_wd_tagger_returns_joined_tags(monkeypatch) -> None:
             return ["long hair", "smile"]
 
     monkeypatch.setattr(cap, "_load_tagger", lambda: FakeTagger())
-    # Backend is a tagger: caption() ignores subject/style and emits tags.
     assert cap.caption(Path("x.png"), subject="whatever", style="prose") == "long hair, smile"

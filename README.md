@@ -42,9 +42,9 @@ Then open <http://127.0.0.1:7861>. Setup offers to store API keys in a gitignore
 | ① Restore / upscale | ComfyUI models, or basic Lanczos | — |
 | ① Subject isolation | **Built-in SAM3** (no ComfyUI) or ComfyUI SAM3 | — |
 | ② Generate shots | ComfyUI: Qwen Image Edit 2511 + Multiple-Angles LoRA | Gemini (Nano Banana) |
-| ③ Caption | Qwen3-VL-8B, JoyCaption, NSFW finetune, **WD taggers**, LM Studio / Ollama / any OpenAI-compatible endpoint | Gemini Flash, Groq free tier |
+| ③ Caption | Qwen3-VL-8B, JoyCaption, NSFW finetune, **WD + e621 taggers**, LM Studio / Ollama / any OpenAI-compatible endpoint | Gemini Flash, Groq free tier |
 | ④ Export | always local (+ optional **.zip** and **Hugging Face** publish) | — |
-| ⑤ Train config | ai-toolkit (incl. **SDXL**) / musubi-tuner | — |
+| ⑤ Train config | ai-toolkit (incl. SDXL) / **kohya sd-scripts** (SDXL) / musubi-tuner | — |
 
 ## The five tabs
 
@@ -58,19 +58,22 @@ flagged automatically.
 
 **③ Caption** — point at **any** folder, pick a captioner, write `.txt` sidecars. Choose
 **prose**, **Danbooru tags** or **e621 tags** to match your target base model (tag-trained
-checkpoints like SDXL / Illustrious / Pony want comma-separated tags, not prose). Test a
-single caption first to compare captioners cheaply, and hand-edit any result inline.
+checkpoints like SDXL / Illustrious / Pony want comma-separated tags, not prose), or run a
+**dedicated tagger** for canonical Danbooru/e621 tags. In *Tag options* you can add a fixed
+**prefix/suffix** (e.g. Pony's `score_9, score_8_up` quality tags), tune tagger thresholds,
+and **skip already-captioned** images. Test a single caption first, and hand-edit inline.
 
 **④ Export** — list your captioned folders, **Load & preview** to see every image with
-its caption status (✓ / empty / missing), then **uncheck** anything you don't want and
-export. You get a flat `NN.png` + `NN.txt` dataset with `metadata.json`. Optionally tick
-**Also save a .zip** for a single upload-ready archive, or **publish to Hugging Face**
-(private by default) straight from the tab.
+its caption status (✓ / empty / missing) — **near-duplicate groups are flagged** so you can
+drop over-weighted repeats — then **uncheck** anything you don't want and export. You get a
+flat `NN.png` + `NN.txt` dataset with `metadata.json` and an `imagefolder`-style
+`metadata.jsonl`. Optionally tick **Also save a .zip** for a single upload-ready archive, or
+**publish to Hugging Face** (private by default) straight from the tab.
 
-**⑤ Train config** *(optional)* — inspects your dataset and writes an ai-toolkit
-`config.yaml` (Flux, Qwen-Image, **SDXL**, …) or musubi `dataset.toml`, with steps and
-buckets derived from the images you actually have. **Nothing is launched** — you get the
-config and the run command.
+**⑤ Train config** *(optional)* — inspects your dataset and writes a training config: an
+ai-toolkit `config.yaml` (Flux, Qwen-Image, **SDXL**, …), a **kohya sd-scripts** SDXL
+`dataset.toml` + command, or a musubi `dataset.toml`, with steps and buckets derived from the
+images you actually have. **Nothing is launched** — you get the config and the run command.
 
 ![Caption tab](docs/images/ui-caption.png)
 
@@ -104,7 +107,8 @@ python cli.py preprocess ./sources --out ./prepped
 python cli.py generate ./prepped --name "Sy Snootles" --engine comfyui --randomize-outfits
 python cli.py caption ./any/folder --trigger sysnootles                 # prose .txt sidecars
 python cli.py caption ./any/folder --trigger sysnootles --caption-style tags   # Danbooru tags
-python cli.py caption ./any/folder --trigger sysnootles --captioner wd-eva02   # WD tagger
+python cli.py caption ./any/folder --trigger sysnootles --captioner wd-eva02   # WD (Danbooru) tagger
+python cli.py caption ./any/folder --captioner z3d-e621 --prefix "score_9, score_8_up"  # e621 tagger + Pony tags
 python cli.py export ./prepped ./generated --name "Sy Snootles" --trigger sysnootles --zip
 python cli.py export ./ds --name "Sy" --publish-hf my-character-lora    # HF, private by default
 python cli.py build source.png --name "Sy Snootles" --trigger sysnootles   # all four
@@ -120,6 +124,7 @@ Each subcommand is standalone; `--help` shows all options (caption style, ZIP, H
 | JoyCaption Beta One | your GPU, ~17 GB | purpose-built diffusion captioner |
 | Qwen3-VL-8B NSFW-Caption | your GPU, ~17 GB | explicit-dataset specialist |
 | **WD EVA02-Large / ViT v3** *(tagger)* | GPU or CPU, ONNX ~0.4–1.4 GB | **canonical Danbooru tags** straight from the image — no VLM prose; needs `onnxruntime` |
+| **Z3D e621 ConvNeXt** *(tagger)* | GPU or CPU, ONNX ~0.4 GB | **canonical e621/furry tags** (Pony, furry checkpoints); needs `onnxruntime` |
 | Gemini Flash | Google API | SFW, ~$0.0007/img est., billed to your key |
 | Groq Qwen3.6 27B | Groq API | SFW, free tier, 8K TPM |
 | LM Studio / Ollama / custom | your choice | any OpenAI-compatible endpoint |
@@ -144,8 +149,9 @@ tab, or `--caption-style prose|tags|e621` on the CLI.
 > **Tag accuracy:** the *VLM* captioners with a tag style *instruct* a general model to
 > produce tags, so the output approximates the vocabulary rather than matching a controlled
 > tag set exactly (JoyCaption, trained on Danbooru + e621, does best). For **canonical
-> Danbooru tags**, pick a **WD tagger** captioner instead — it reads tags directly from the
-> image (needs `onnxruntime`; it ignores the prose/tags/e621 selector).
+> tags**, pick a dedicated tagger — **WD** (Danbooru) or **Z3D e621** (furry) — which reads
+> tags directly from the image (needs `onnxruntime`; taggers ignore the prose/tags/e621
+> selector and the tagger thresholds in *Tag options* tune how many tags they emit).
 
 ## API keys (cloud options only)
 

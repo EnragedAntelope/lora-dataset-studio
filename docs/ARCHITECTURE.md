@@ -1,6 +1,6 @@
 # Architecture
 
-Version: 0.7.0
+Version: 0.8.0
 
 ```
 app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)
@@ -11,10 +11,15 @@ studio/
   pipeline.py           Stage orchestration: preprocess_sources(), generate_shots()
   preprocess.py         Restore (comfyui|basic|auto) + isolate + resize
   isolate.py            Subject isolation: builtin SAM3 (transformers) | comfyui
-  tagger.py             WD (SmilingWolf) ONNX tagger backend: canonical Danbooru
-                        tags straight from image features. Pure select/format
-                        logic is I/O-free (unit-tested); onnxruntime + hub download
-                        are lazy. Exposed as the "wd_tagger" captioner backend
+  tagger.py             ONNX booru-tagger backend: canonical tags straight from
+                        image features — WD (Danbooru) and Z3D (e621) via one code
+                        path, differing only in tag file + category SCHEMES. Pure
+                        select/format logic is I/O-free (unit-tested); onnxruntime +
+                        hub download are lazy. The "wd_tagger" captioner backend
+  dedupe.py             Advisory near-duplicate detection (perceptual dHash,
+                        numpy-only) surfaced in the ④ export preview
+  quality.py            Advisory sharpness (blur) + exposure/contrast flags
+                        (dark/bright/low-contrast) for the curate/export views
   hf_publish.py         Optional, opt-in publish of a dataset folder to the HF Hub
                         (private by default; write HF_TOKEN; huggingface_hub lazy)
   captioner.py          Captioner backends (transformers | gemini | openai-compat |
@@ -24,10 +29,11 @@ studio/
                         spec_overrides (runtime config for the custom endpoint).
                         caption(style=) picks prose vs booru-tag template per spec;
                         finalize_caption(style=) normalizes tag output (dedupe,
-                        lowercase, trigger-first)
-  quality.py            Advisory sharpness check (variance of Laplacian, numpy-only)
-  package.py            Dataset export (NN.png/NN.txt + metadata.json + README.txt);
-                        zip_dataset() bundles a packaged folder into a sibling .zip;
+                        lowercase, trigger-first). apply_affixes() wraps captions
+                        with fixed prefix/suffix (quality/score tags); skip_existing
+                        leaves already-captioned images alone
+  package.py            Dataset export (NN.png/NN.txt + metadata.json + metadata.jsonl
+                        + README.txt); zip_dataset() bundles a folder into a .zip;
                         resolve_export_items() classifies candidates by caption sidecar
                         state (ready/empty/missing) — shared by the UI gate and the CLI
   shotplan.py           Default shot plan (curated 24 shots: angles, poses, emotions,
@@ -38,12 +44,12 @@ studio/
   plan_io.py            Save/load shot plans as YAML (user-editable prompt libraries)
   dataset_stats.py      Inspect a dataset folder (count/sizes/aspects) -> suggested
                         steps + bucket ladder, so ⑤'s numbers are derived not guessed
-  trainer_configs.py    Emit LoRA-trainer configs (ai-toolkit config.yaml / musubi
-                        dataset.toml) + run-command builders + model registry.
-                        ModelPreset carries per-arch train/sample knobs
-                        (noise_scheduler/sample_guidance/sample_steps) so SDXL
-                        (ddpm, higher CFG) renders correctly beside the flux/qwen
-                        flow-matching presets
+  trainer_configs.py    Emit LoRA-trainer configs (ai-toolkit config.yaml / kohya
+                        sd-scripts kohya-dataset.toml / musubi dataset.toml) +
+                        run-command builders + model registry. ModelPreset carries
+                        per-arch train/sample knobs (noise_scheduler/sample_guidance/
+                        sample_steps) so SDXL (ddpm, higher CFG) renders correctly
+                        beside the flux/qwen flow-matching presets
   user_config.py        Persist trainer install paths, last training settings, and the
                         custom captioner endpoint (URL/model/key-env-NAME/spacing) to
                         .cache/user_settings.json (no secrets; gitignored)
@@ -190,17 +196,54 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
   than raising. Caveat worth remembering: the backend *instructs* a general VLM to emit
   tags, so output approximates the vocabulary; a dedicated tagger would be needed for a
   canonical tag set (backlog).
-- **The WD tagger is a captioner backend, not a style.** `backend="wd_tagger"` runs a
-  SmilingWolf ONNX tagger that emits canonical Danbooru tags directly from image features —
-  so it *ignores* the prose/tags/e621 selector, and both `caption_images` and the UI's test
-  path force `style="tags"` for it (tag finalization). Its pure selection/formatting logic
+- **The tagger is a captioner backend, not a style.** `backend="wd_tagger"` runs an ONNX
+  tagger that emits canonical tags directly from image features — so it *ignores* the
+  prose/tags/e621 selector, and both `caption_images` and the UI's test path force
+  `style="tags"` for it (tag finalization). Its pure selection/formatting logic
   (`select_tag_names`, `format_tag`) lives in `tagger.py` free of model/file I/O and is
-  unit-tested; `onnxruntime` and the huggingface download are lazy (inside `WDTagger.load`),
-  so nobody who doesn't pick a tagger pays for them. WD v3 preprocessing is exact and
-  non-obvious (white-pad to square, resize, **RGB→BGR**, float32 **0–255, no normalization**,
-  NHWC) — do not "tidy" it. Outputs are already sigmoid probabilities. Character-category
-  tags use a high default threshold (0.85) so an original character doesn't get mislabelled
-  as a known booru character.
+  unit-tested; `onnxruntime` and the huggingface download are lazy (inside `Tagger.load`),
+  so nobody who doesn't pick a tagger pays for them. Preprocessing is exact and non-obvious
+  (white-pad to square, resize, **RGB→BGR**, float32 **0–255, no normalization**, NHWC) — do
+  not "tidy" it. Outputs are already sigmoid probabilities.
+- **Danbooru and e621 taggers share one code path; only the tag file + categories differ.**
+  WD (`selected_tags.csv`) and Z3D-E621 (`tags-selected.csv`) both expose `name`/`category`
+  columns, so `_read_selected_tags` reads either. The *meaning* of the category ids differs,
+  captured in `SCHEMES`: Danbooru {general:0, character:4}; e621 {general:0+5(species),
+  character:1(artist)/3(copyright)/4/8(lore)} with meta/invalid dropped. e621 **species**
+  rides the general threshold (it reads like a descriptor for training); artist/character/
+  copyright ride the higher character threshold so an original subject isn't stamped with a
+  known artist/character. The e621 model (`toynya/Z3D-E621-Convnext`) is a community weight —
+  documented as such; its output should be spot-checked. Same white-pad/BGR/0–255 recipe as
+  WD (the standard tagger extensions use it for both).
+- **Tagger thresholds flow through `spec_overrides`, not a new arg.** The ③ sliders set
+  `general_threshold`/`character_threshold` via the same `CaptionerSpec.model_copy(update=…)`
+  path the custom endpoint uses — no bespoke plumbing, and the registry spec stays pristine.
+- **Caption prefix/suffix is a post-finalize wrap, applied once.** `apply_affixes` runs after
+  `finalize_caption` (so the trigger is already placed) and joins with a comma for tag styles,
+  a space for prose. It exists for constant tags the model shouldn't be asked to invent —
+  Pony `score_9, …`, Danbooru `masterpiece, best quality`. Empty prefix/suffix is a strict
+  no-op, so existing captions are unchanged.
+- **Composition flags are honest heuristics, not a framing model.** `quality.composition_flags`
+  labels exposure/contrast outliers (dark/bright/low-contrast) from mean/std of luminance —
+  numpy-only, advisory, shown next to the blur flag in ②. It deliberately does **not** claim
+  semantic framing (face/bust/body/back); that needs a detector and is left to the backlog.
+  Like sharpness it never blocks — the curate gallery wraps it in try/except.
+- **Near-duplicate detection is advisory dHash, surfaced in ④.** `dedupe.find_near_duplicate_
+  groups` groups images within a small Hamming distance and the export preview lists them so
+  the user can uncheck over-weighted repeats. It never auto-drops. Note a dHash quirk: flat
+  images (solid colour) all hash alike, so a set of near-blank frames may group together —
+  acceptable for an advisory.
+- **`metadata.jsonl` is written for every export.** `package_dataset` emits the HuggingFace
+  `imagefolder` sidecar (`{"file_name","text"}` per image) alongside `metadata.json`, so the
+  dataset also loads via `datasets.load_dataset("imagefolder", …)`. `.txt`-based trainers
+  ignore it; it carries captions only, no secrets.
+- **kohya sd-scripts uses a different dataset layout from musubi.** Even though musubi is a
+  kohya fork, sd-scripts wants `[[datasets.subsets]]` with `image_dir` (not musubi's
+  `[[datasets]]` + `image_directory`), so `render_kohya_toml` is its own renderer. SDXL base
+  is a runnable HF id; a family checkpoint (Pony/Illustrious/NoobAI) is a user-local
+  `<<FILL>>`. `kohya_command` threads every hyperparameter from the `TrainConfig` (same
+  discipline as the musubi fix) and uses `sdxl_train_network.py`. Verified by unit tests on
+  the rendered text, never a live run.
 - **SDXL is not flow-matching.** The ai-toolkit renderer used to hardcode `noise_scheduler:
   flowmatch` and `guidance_scale: 4`, which are correct for Flux/Qwen/Z-Image but wrong for
   SDXL (wants `ddpm` and CFG ~7). Those three knobs now live on `ModelPreset`
@@ -280,7 +323,24 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
 
 ## Roadmap / deferred
 
-Done this revision (0.7.0) — market-gap backlog items 2–5, in one pass:
+Done this revision (0.8.0) — remaining backlog items 2–3 + all six 0.7.0 "further ideas":
+
+- ✅ **e621 tagger (③)** — `toynya/Z3D-E621-Convnext` added through the generalized `Tagger`
+  (scheme-driven categories); canonical furry/Pony tags. Shares the WD code path.
+- ✅ **Composition advisory in curate (②)** — `quality.composition_flags` (dark/bright/
+  low-contrast) shown next to the blur flag; honest exposure heuristics, advisory only.
+- ✅ **Tagger threshold controls (③)** — general/character sliders threaded via `spec_overrides`.
+- ✅ **Caption prefix/suffix (③/④)** — `apply_affixes` for constant quality/score tags (Pony,
+  Danbooru), UI *Tag options* + CLI `--prefix/--suffix`.
+- ✅ **Skip already-captioned (③)** — `skip_existing` leaves images with a caption untouched;
+  UI checkbox + CLI `--skip-captioned`.
+- ✅ **Near-duplicate advisory (④)** — `dedupe.py` (dHash) flags near-identical groups in the
+  export preview; never auto-drops.
+- ✅ **`metadata.jsonl` (④)** — HuggingFace `imagefolder` sidecar written on every export.
+- ✅ **kohya sd-scripts trainer (⑤)** — SDXL LoRA `kohya-dataset.toml` + command (its own
+  subsets layout); every hyperparameter threaded, unit-tested.
+
+Done in 0.7.0 — market-gap backlog items 2–5, in one pass:
 
 - ✅ **Dedicated WD tagger backend (③)** — `tagger.py` + the `wd_tagger` captioner backend
   (WD EVA02-Large / ViT v3) emit **canonical Danbooru tags** from the image, for higher tag
@@ -343,52 +403,40 @@ scrape, or bundle a heavyweight frontend. The items below are the ones that *fit
 project's shape (standalone stages, per-stage local/cloud choice, lazy heavy imports,
 honest output), prioritized by benefit-to-cost. Take from the top.
 
-**Shipped** (items 1–5): tag caption styles (0.6.0); WD tagger backend, SDXL trainer
-presets, ZIP export, and HF dataset publishing (all 0.7.0 — see "Done" above). Remaining,
-still prioritized by benefit-to-cost:
+**Shipped** (items 1–5 + 2–3): tag caption styles (0.6.0); WD tagger, SDXL presets, ZIP
+export, HF publishing (0.7.0); e621 tagger + composition advisory (0.8.0). Remaining, still
+prioritized by benefit-to-cost:
 
 1. **Concept & Style dataset types (②).** We are character-only; a "style" mode (no
    isolation, prose/tags describe the aesthetic, trigger always-on) and a "concept" mode
    (object/action) are a larger shot-plan change but a genuine capability gap. Design before
-   building — it touches ②'s whole shot model.
-2. **e621-specific tagger.** The WD tagger emits Danbooru tags; a dedicated e621 tagger
-   (e.g. a Z3D/e621 ConvNeXt or JoyTag) would give canonical *furry* tags to match the e621
-   caption style. Same backend shape as `wd_tagger`, just a different model + vocabulary.
-3. **Framing/composition advisory in curate (②).** Cheap, dependency-light classification
-   (face / bust / body / back, off-center) surfaced like the existing sharpness flag —
-   advisory only, never blocking. Helps spot a dataset skewed to one framing.
-4. **Face-similarity identity guard (② curate).** Flag generated shots that drift from the
+   building — it touches ②'s whole shot model. **Now the top remaining item.**
+2. **Face-similarity identity guard (② curate).** Flag generated shots that drift from the
    reference's identity. Genuinely useful for character LoRAs but needs a face-recognition
    dependency (InsightFace + onnxruntime); previously deferred for that reason. Revisit if
    identity drift bites users — could be an optional extra like the gated SAM3 download.
 
-### Further ideas identified (0.7.0 review)
+*(All six "further ideas" logged in the 0.7.0 review shipped in 0.8.0 — prefix/suffix,
+tagger thresholds, near-dup advisory, `metadata.jsonl`, kohya trainer, skip-already-captioned.)*
 
-Newer candidates that fit the project's shape, surfaced while building items 2–5. Mostly
-small, high-leverage follow-ups to what just shipped — not yet prioritized against the four
-above, but recorded so they aren't lost.
+### Further ideas identified (0.8.0 review)
 
-- **Caption prefix/suffix — quality/score tags (③/④).** Now that tag captions exist, let the
-  user set a fixed prefix/suffix applied after the trigger — Pony wants `score_9,
-  score_8_up, …`, Danbooru boorus want `masterpiece, best quality`. Cheap; high value for the
-  tag ecosystem we just enabled. Applies at caption time or as an export transform.
-- **WD tagger threshold controls in the UI (③).** Expose the general/character thresholds
-  (fixed at 0.35 / 0.85 today) so users can tune tag density. Small, natural follow-up to the
-  tagger backend — the plumbing (`CaptionerSpec.general_threshold/character_threshold`) is
-  already there.
-- **Near-duplicate advisory at export (④).** A perceptual-hash (dHash, numpy-only) flag for
-  near-identical images, surfaced like the sharpness advisory — advisory only, never
-  auto-dropping. Dependency-light; catches an over-weighted duplicate before packaging.
-- **HF `metadata.jsonl` in the export (④).** Also write the HuggingFace `imagefolder`
-  metadata (one `{"file_name": …, "text": …}` line per image) so the exported/published
-  dataset loads directly via `datasets.load_dataset("imagefolder", …)`. Trivial; complements
-  the new HF publishing.
-- **kohya-ss sd-scripts trainer target (⑤).** SDXL LoRAs are most often trained with kohya
-  `sd-scripts`, not ai-toolkit or musubi. Adding it as a third trainer would make the new
-  SDXL preset genuinely one-command for the common case. Real work + must be verified against
-  sd-scripts' args (honest `<<FILL>>` where unsure), so a backlog item, not a quick win.
-- **"Skip already-captioned" toggle (③).** Option to skip images that already have a
-  non-empty `.txt` instead of overwriting — QoL when iterating captions on a large set.
+New candidates that fit the project's shape, surfaced while building this round. Small,
+high-leverage; recorded so they aren't lost.
+
+- **Global tag blacklist / drop-list (③/④).** Let the user drop noisy tags a tagger loves
+  (`simple background`, `signature`, `watermark`) across a whole folder — complements the
+  prefix/suffix. Cheap; a small transform on the finalized tag list.
+- **Optional rating tags for taggers (③).** WD/Z3D expose safe/questionable/explicit ratings
+  we currently drop; some SDXL/Pony workflows want them. Add an opt-in that appends the top
+  rating — the selector already sees rating categories, so it's a small switch.
+- **Keep-underscores toggle for tags (③).** A few trainers ingest raw booru tags with
+  underscores; `format_tag` already centralizes the transform, so a toggle is trivial.
+- **Resolution normalization at export (④).** Optional pad-to-square / center-crop to a target
+  size for trainers that want uniform square inputs — advisory today via buckets, but a real
+  transform would help SDXL-at-1024 users. Larger; design first.
+- **Configurable near-dup sensitivity (④).** Expose the dHash distance (fixed at 5) so users
+  can loosen/tighten the advisory. Trivial once someone asks.
 
 **Explicitly not pursuing** (conflict with this project's scope): in-app training launch /
 cloud GPU rental, Test Studio / checkpoint ranking, Merge Lab, and web scraping. The

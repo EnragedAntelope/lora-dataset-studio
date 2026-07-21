@@ -141,9 +141,12 @@ class CaptionerSpec(BaseModel):
     # "qwen_vl" and "llava" share one transformers code path but need
     # different chat-template quirks (JoyCaption wants its system prompt).
     prompt_style: str = "qwen_vl"
-    # wd_tagger backend: probability cut-offs for general vs character tags.
+    # wd_tagger backend: probability cut-offs for general vs character tags,
+    # plus the tag-CSV filename and vocabulary scheme ("danbooru" | "e621").
     general_threshold: float = 0.35
     character_threshold: float = 0.85
+    tags_file: str = "selected_tags.csv"
+    tag_scheme: str = "danbooru"
     vram_note: str = ""
     nsfw_capable: bool = True
     cost_note: str = "free"
@@ -205,6 +208,16 @@ CAPTIONERS: list[CaptionerSpec] = [
         label="Local tagger: WD ViT v3 (Danbooru tags, lighter/faster)",
         backend="wd_tagger",
         hf_id="SmilingWolf/wd-vit-tagger-v3",
+        vram_note="~0.4 GB ONNX (needs onnxruntime)",
+        cost_note="free (local tagger)",
+    ),
+    CaptionerSpec(
+        key="z3d-e621",
+        label="Local tagger: Z3D e621 ConvNeXt (canonical e621/furry tags)",
+        backend="wd_tagger",
+        hf_id="toynya/Z3D-E621-Convnext",
+        tags_file="tags-selected.csv",
+        tag_scheme="e621",
         vram_note="~0.4 GB ONNX (needs onnxruntime)",
         cost_note="free (local tagger)",
     ),
@@ -381,6 +394,12 @@ class Settings(BaseSettings):
     # Images whose variance-of-Laplacian sharpness score is below this are
     # flagged (advisory only) in the curate/export views. Tune per source set.
     sharpness_blur_threshold: float = 100.0
+    # Advisory exposure/contrast flags (curate view). Mean luminance (0-255)
+    # at/under dark or at/over bright is flagged; luminance std at/under
+    # low_contrast is "low contrast". All advisory — never block.
+    dark_luma_threshold: float = 40.0
+    bright_luma_threshold: float = 220.0
+    low_contrast_threshold: float = 25.0
 
     # ComfyUI model filenames used by the optional workflow templates
     # (relative to your ComfyUI models folders — see docs/comfyui-setup.md)

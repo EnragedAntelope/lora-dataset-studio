@@ -24,6 +24,7 @@ from studio.captioner import (
     SUBJECT_ALIASES,
     Captioner,
     CaptionerConfigError,
+    apply_affixes,
     caption_images,
     estimate_caption_cost,
     finalize_caption,
@@ -188,13 +189,17 @@ def _gen_gallery(results: list[pipeline.GenResult]):
     for r in ok:
         label = r.shot.id
         try:
-            from studio.quality import is_blurry
+            from studio.quality import composition_flags, is_blurry
 
+            flags: list[str] = []
             blurry, score = is_blurry(r.path)
             if blurry:
-                label = f"{r.shot.id}  ⚠ blurry ({score:.0f})"
+                flags.append(f"blurry ({score:.0f})")
+            flags += composition_flags(r.path)
+            if flags:
+                label = f"{r.shot.id}  ⚠ {', '.join(flags)}"
         except Exception:
-            pass  # sharpness is advisory — never block the gallery on it
+            pass  # quality checks are advisory — never block the gallery on them
         gallery.append((str(r.path), label))
     ids = [r.shot.id for r in ok]
     return gallery, gr.CheckboxGroup(choices=ids, value=ids)
@@ -342,15 +347,26 @@ def save_custom_captioner(base_url: str, model: str, api_key_env: str,
             f"Select the 'Custom OpenAI-compatible endpoint' captioner to use it.")
 
 
+def _tagger_overrides(captioner_key: str, spec_overrides, gen_thr, char_thr):
+    """Merge the UI's tagger thresholds into spec_overrides (taggers only)."""
+    if CAPTIONERS_BY_KEY[captioner_key].backend != "wd_tagger":
+        return spec_overrides
+    return {**(spec_overrides or {}),
+            "general_threshold": float(gen_thr),
+            "character_threshold": float(char_thr)}
+
+
 def do_test_caption(folder: str, selected: list[str], captioner_key: str,
-                    name: str, trigger: str, gemini_model: str, style: str):
+                    name: str, trigger: str, gemini_model: str, style: str,
+                    gen_thr: float, char_thr: float, prefix: str, suffix: str):
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select at least one image first.")
     path = Path(folder.strip()) / selected[0]
-    # A dedicated tagger always emits Danbooru tags, whatever the radio says.
+    # A dedicated tagger always emits Danbooru/e621 tags, whatever the radio says.
     if CAPTIONERS_BY_KEY[captioner_key].backend == "wd_tagger":
         style = "tags"
     model_override, spec_overrides = _resolve_captioner_config(captioner_key, gemini_model)
+    spec_overrides = _tagger_overrides(captioner_key, spec_overrides, gen_thr, char_thr)
     cap = Captioner(captioner_key, model_override=model_override, spec_overrides=spec_overrides)
     try:
         raw = cap.caption(path, subject=name or "the character", style=style)
@@ -358,7 +374,8 @@ def do_test_caption(folder: str, selected: list[str], captioner_key: str,
         raise gr.Error(str(e))
     finally:
         cap.unload()
-    return finalize_caption(raw, trigger, name, SUBJECT_ALIASES, style=style)
+    caption = finalize_caption(raw, trigger, name, SUBJECT_ALIASES, style=style)
+    return apply_affixes(caption, prefix, suffix, style)
 
 
 def load_one_caption(folder: str, filename: str) -> str:
@@ -398,13 +415,15 @@ def _merge_export_folders(existing: str, new_folder: str) -> str:
 
 def do_caption(folder: str, selected: list[str], captioner_key: str,
                name: str, trigger: str, gemini_model: str, style: str,
-               exp_folders_prev: str, exp_name_prev: str, exp_trigger_prev: str,
-               progress=gr.Progress()):
+               gen_thr: float, char_thr: float, prefix: str, suffix: str,
+               skip_existing: bool, exp_folders_prev: str, exp_name_prev: str,
+               exp_trigger_prev: str, progress=gr.Progress()):
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select the images to caption first.")
     base = Path(folder.strip())
     images = [base / s for s in selected]
     model_override, spec_overrides = _resolve_captioner_config(captioner_key, gemini_model)
+    spec_overrides = _tagger_overrides(captioner_key, spec_overrides, gen_thr, char_thr)
     log: list[str] = []
 
     def report(msg: str):
@@ -414,7 +433,8 @@ def do_caption(folder: str, selected: list[str], captioner_key: str,
     try:
         items = caption_images(images, captioner_key, name, trigger, progress=report,
                                model_override=model_override, spec_overrides=spec_overrides,
-                               style=style)
+                               style=style, prefix=prefix, suffix=suffix,
+                               skip_existing=skip_existing)
     except Exception as e:
         raise gr.Error(f"Captioning failed: {e}")
     for img, caption in items:
@@ -461,6 +481,18 @@ def load_export_preview(folders_text: str):
     note = (f"**{len(images)} image(s)** — {ready} ready · {empty} empty caption · "
             f"{none_} no caption. All checked below; **uncheck to drop**. "
             "Images without a usable caption are skipped even if left checked.")
+    try:  # advisory near-duplicate scan — never blocks the preview
+        from studio.dedupe import find_near_duplicate_groups
+
+        groups = find_near_duplicate_groups(images)
+        if groups:
+            shown = "; ".join("=".join(f"{p.parent.name}/{p.name}" for p in g)
+                              for g in groups[:5])
+            more = f" (+{len(groups) - 5} more)" if len(groups) > 5 else ""
+            note += (f"\n\n🔁 **{len(groups)} near-duplicate group(s)** — consider "
+                     f"unchecking extras so one shot isn't over-weighted: {shown}{more}")
+    except Exception:
+        pass
     return gallery, gr.CheckboxGroup(choices=choices, value=values), note
 
 
@@ -671,6 +703,10 @@ def do_generate_train_config(trainer: str, model_key: str, dataset_dir: str,
     if trainer == "musubi":
         caveat = ("\n\n⚠️ musubi needs your local DiT / VAE / text-encoder paths — "
                   "fill the <<FILL: …>> placeholders in the command before running.")
+    elif trainer == "kohya":
+        caveat = ("\n\n⚠️ kohya sd-scripts: SDXL base runs from the HF id shown; for a "
+                  "Pony / Illustrious / NoobAI checkpoint, replace the <<FILL>> pretrained "
+                  "path. Verify flags against the sd-scripts docs before a long run.")
     return (f"✅ Wrote:\n{files}\n\nDataset: {stats.n_images} images, "
             f"{stats.min_long_side}-{stats.max_long_side}px long side{bucket_note}\n\n"
             f"Run it with:\n{command}{caveat}\n\n"
@@ -885,7 +921,27 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                              "comma-separated tags, not prose. Danbooru and e621 are different "
                              "vocabularies — pick the one your base model was trained on. The "
                              "trigger stays first either way. (The 'Local tagger' captioners "
-                             "ignore this and always emit canonical Danbooru tags.)")
+                             "ignore this and always emit canonical tags.)")
+                    with gr.Accordion("Tag options (taggers & tag styles)", open=False):
+                        gr.Markdown(
+                            "Fixed **prefix/suffix** ride on every caption — e.g. Pony's "
+                            "`score_9, score_8_up, score_7_up` quality tags. **Thresholds** "
+                            "tune how many tags the *taggers* emit (lower general = more "
+                            "tags).")
+                        cap_prefix = gr.Textbox(
+                            label="Fixed prefix (added before the trigger)",
+                            placeholder="score_9, score_8_up, score_7_up")
+                        cap_suffix = gr.Textbox(label="Fixed suffix (added at the end)")
+                        with gr.Row():
+                            cap_gen_thr = gr.Slider(
+                                0.05, 0.95, value=0.35, step=0.05,
+                                label="Tagger: general threshold")
+                            cap_char_thr = gr.Slider(
+                                0.05, 0.95, value=0.85, step=0.05,
+                                label="Tagger: character threshold")
+                        cap_skip = gr.Checkbox(
+                            value=False,
+                            label="Skip images that already have a caption")
                     cap_cost = gr.Markdown()
                     cap_gemini_model = gr.Dropdown(
                         CAPTION_MODEL_CHOICES, value=_DEFAULT_CAPTION_MODEL,
@@ -1083,11 +1139,12 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
         [cap_custom_note])
     btn_test.click(do_test_caption,
                    [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model,
-                    cap_style],
+                    cap_style, cap_gen_thr, cap_char_thr, cap_prefix, cap_suffix],
                    [test_caption])
     btn_caption.click(
         do_caption,
         [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model, cap_style,
+         cap_gen_thr, cap_char_thr, cap_prefix, cap_suffix, cap_skip,
          exp_folders, exp_name, exp_trigger],
         [cap_gallery, cap_select, cap_result, log_box, exp_folders, exp_name, exp_trigger]) \
                .then(_editor_choices, [cap_folder], [cap_edit_file])

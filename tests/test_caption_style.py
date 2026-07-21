@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from studio import captioner as C
 from studio.captioner import (
     SUBJECT_ALIASES,
     _normalize_tags,
+    apply_affixes,
+    caption_images,
     finalize_caption,
 )
 from studio.config import CAPTIONERS_BY_KEY
@@ -111,3 +116,50 @@ def test_finalize_default_style_is_prose() -> None:
     tags = finalize_caption(raw, "trig", "", SUBJECT_ALIASES, style="tags")
     assert prose == "trig, a Person Standing Outside."
     assert tags == "trig, a person standing outside"
+
+
+# ---------- prefix / suffix affixes ----------
+
+def test_apply_affixes_tags_uses_comma() -> None:
+    out = apply_affixes("trig, standing", "score_9, score_8_up", "", "tags")
+    assert out == "score_9, score_8_up, trig, standing"
+
+
+def test_apply_affixes_prose_uses_space_and_suffix() -> None:
+    out = apply_affixes("trig, a person", "photo of", "high quality", "prose")
+    assert out == "photo of trig, a person high quality"
+
+
+def test_apply_affixes_empty_is_noop() -> None:
+    assert apply_affixes("trig, standing", "", "  ", "tags") == "trig, standing"
+
+
+# ---------- caption_images: skip_existing + affixes (no real model) ----------
+
+def _stub_model(monkeypatch, text: str) -> None:
+    monkeypatch.setattr(C.Captioner, "caption",
+                        lambda self, image_path, subject="the character", style="prose": text)
+    monkeypatch.setattr(C.Captioner, "load", lambda self: None)
+    monkeypatch.setattr(C.Captioner, "unload", lambda self: None)
+
+
+def test_caption_images_skip_existing(tmp_path: Path, monkeypatch) -> None:
+    imgs = []
+    for i in range(3):
+        p = tmp_path / f"{i}.png"
+        p.write_bytes(b"x")
+        imgs.append(p)
+    (tmp_path / "0.txt").write_text("already captioned", encoding="utf-8")
+    _stub_model(monkeypatch, "trig, tag")  # gemini backend -> no real load
+    items = caption_images(imgs, "gemini-flash", trigger="trig", skip_existing=True)
+    done = {p.name for p, _ in items}
+    assert done == {"1.png", "2.png"}  # the already-captioned 0.png is skipped
+
+
+def test_caption_images_applies_prefix(tmp_path: Path, monkeypatch) -> None:
+    p = tmp_path / "a.png"
+    p.write_bytes(b"x")
+    _stub_model(monkeypatch, "a, b")
+    items = caption_images([p], "gemini-flash", trigger="trig", style="tags",
+                           prefix="score_9")
+    assert items[0][1] == "score_9, trig, a, b"
