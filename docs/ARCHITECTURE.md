@@ -501,10 +501,9 @@ honest output), prioritized by benefit-to-cost. Take from the top.
 export, HF publishing (0.7.0); e621 tagger + composition advisory (0.8.0). Remaining, still
 prioritized by benefit-to-cost:
 
-1. **Concept & Style dataset types (②).** We are character-only; a "style" mode (no
-   isolation, prose/tags describe the aesthetic, trigger always-on) and a "concept" mode
-   (object/action) are a larger shot-plan change but a genuine capability gap. Design before
-   building — it touches ②'s whole shot model. **Now the top remaining item.**
+1. **Concept & Style dataset types.** We are character-only; "style" and "concept" datasets are
+   a genuine capability gap. **APPROVED and fully specced — see "Approved plan: Style & Concept
+   dataset support" below. This is the next feature to build.**
 2. **Face-similarity identity guard (② curate).** Flag generated shots that drift from the
    reference's identity. Genuinely useful for character LoRAs but needs a face-recognition
    dependency (InsightFace + onnxruntime); previously deferred for that reason. Revisit if
@@ -544,6 +543,85 @@ prioritized by benefit-to-cost:
 - **Alpha (RGBA) cutout option (①).** Export the isolated subject on transparency instead of
   white for workflows that composite their own backgrounds. Small toggle; white stays the
   default (the Multiple-Angles LoRA is trained on white).
+
+### Approved plan: Style & Concept dataset support (Phase 1)
+
+**Status: approved, not yet built.** Owner signed off on the shape and the three decisions
+below; a future session can execute Phase 1 from this spec cold. Do **not** change the tested,
+tuned Character path — it must stay byte-identical (it is the default).
+
+**Locked decisions:**
+1. **Global header selector** — one `Dataset type` radio (`Character` / `Style` / `Concept`,
+   default `Character`) in the app header, threaded into the ①/③/⑤ handlers and CLI. This is a
+   *deliberate, documented exception* to Design-rule #2 ("no global mode"): a dataset **is** one
+   type, and per-tab type controls invite mismatch. Stages still run standalone — the type only
+   tunes prompts/defaults, it is not pipeline state. Note the exception where rule #2 lives.
+2. **Concept generation in ② is Phase 2 (later), not now.** Phase 1 ships Style & Concept via
+   caption framing + defaults; those users bring their own image sets through ③→④→⑤ (already
+   standalone). ② stays Character-only with type-aware guidance copy.
+3. **Style captions default to *describe content*** (standard best practice: the model attributes
+   the constant look to the trigger), **with an opt-in "sparse captions" toggle** (trigger + a
+   few words) for users who want a stronger style at the risk of the trigger absorbing content.
+   Sparse is a Style-only sub-option; Character/Concept ignore it.
+
+**Per-type semantics:**
+
+| | Character (today, unchanged) | Style | Concept |
+|---|---|---|---|
+| Trigger learns | an identity | an aesthetic/look | an object/action/idea |
+| Caption describes | what *varies* (pose/angle/setting), not identity | the image *content* (subjects, composition), **not** the style/medium | the *context*, not the concept's fixed form |
+| ① isolation default | on | off (style is whole-image) | user's choice (on for objects) |
+| ② generation | 24-shot plan | N/A — bring your own set | Phase 2 |
+| ⑤ sample prompt | "a photo of {trig}, standing outdoors" | "{trig}, a mountain landscape" | "a photo of {trig}" |
+
+**Phase 1 implementation (file by file):**
+
+- **`config.py` (or a new small `dataset_types.py` if `config.py` gets crowded).** Add a
+  `DATASET_TYPES = ("character", "style", "concept")` constant. Extend caption prompt selection:
+  `CaptionerSpec.prompt_for(style)` → `prompt_for(style, dataset_type="character", sparse=False)`.
+  - `character` → return today's per-model templates **unchanged** (no regression).
+  - `style`/`concept` → **compose** the instruction from (a) a per-type *framing* string + (b)
+    the prose/tags/e621 *format* directive. Compose, do **not** store 9 new templates per spec —
+    that is the anti-bloat choice. Give JoyCaption/NSFW a light touch via the existing
+    `prompt_style`/spec flags (JoyCaption keeps its "refer to them as X" convention; NSFW appends
+    its plainness clause), rather than bespoke per-model style/concept templates.
+  - `sparse=True` (style only) → a minimal framing ("emit only {trigger} plus at most a few words
+    naming the main content"), still respecting the format directive.
+- **`captioner.py`.** Thread `dataset_type` (and `sparse`) through `Captioner.caption()`,
+  `caption_images()`, `caption_folder()`. Branch `finalize_caption(..., dataset_type=)`:
+  Style/Concept are trigger-first with **no alias→name replacement** (there is no "the woman"→name
+  mapping for a look or an object); the Character prose path is unchanged. Tag/e621 finalization is
+  already identity-free, so it needs no per-type change beyond receiving the composed prompt.
+  Blacklist/affix/rating/underscore plumbing is type-agnostic and untouched.
+- **`app.py`.** Add the header `dataset_type` radio; make it an input to the ① preprocess, ③
+  caption/test, and ⑤ config handlers. On change: flip the ① isolation-checkbox default, swap the
+  ② guidance Markdown (Style → "use your own collected images, skip to ③"; Concept → object note),
+  update the ③ trigger tooltip wording ("identity" / "style token" / "concept token"), and show a
+  Style-only "Sparse captions" checkbox in ③. Keep the Character UI identical when type=Character.
+- **`trainer_configs.py`.** `_sample_prompt(cfg)` varies by a new `cfg.dataset_type` field. Presets
+  and rendered keys are otherwise unaffected.
+- **`package.py` / export.** Record `dataset_type` in `metadata.json` (and the CLI `build`/`export`
+  metadata). No format change to the dataset itself.
+- **`cli.py`.** Add `--dataset-type character|style|concept` (validated like `--caption-style`) to
+  `caption` and `build`; add `--sparse` for style. Thread into the same functions the UI calls.
+- **Docs.** README gains a short "Dataset types" subsection (keep it tight); this file gets the new
+  templates in the module map, a gotcha on the compose-not-store decision + the rule-#2 exception,
+  and moves this item to "Done". Update tooltips in the same change.
+- **Tests.** New `tests/test_dataset_types.py`: each type × {prose,tags,e621} composes a sensible,
+  `{subject}`/`{trigger}`-slotted instruction; sparse produces a minimal one; `finalize_caption`
+  Style/Concept is trigger-first with no name injection; Character output is **byte-identical** to
+  the current tests (guard against regression); metadata records the type; CLI validation rejects a
+  bad `--dataset-type`.
+
+**Phase 2 (later, only if synthetic concept generation is wanted):** a concept shot plan in
+`shotplan.py` (angle + context variation, no emotions/wardrobe) so object concepts can be
+multi-angled via the existing Qwen-Edit + angles LoRA. Touches the shot model; needs its own tests.
+Style never generates.
+
+**Anti-bloat guardrails for whoever builds this:** compose prompts (don't multiply templates);
+reuse `prompt_for`/`finalize_caption`/spec flags (no parallel captioner path); Character path
+byte-identical; no new heavy deps (pure string work); default everything to prose; update tooltips
++ both MD files in the same change.
 
 **Explicitly not pursuing** (conflict with this project's scope): in-app training launch /
 cloud GPU rental, Test Studio / checkpoint ranking, Merge Lab, and web scraping. The
