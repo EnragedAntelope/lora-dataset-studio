@@ -89,6 +89,40 @@ studio/
    with anything (hand-written captions, other tools) and lets export (④) work on any
    folder that has pairs.
 
+## Maintainer principles (standing demands)
+
+These are the project owner's repeated, non-negotiable expectations for every change. They
+sit alongside the architectural Design rules above and apply to all future work — treat a
+change that violates one as incomplete.
+
+1. **No bloat, no unwarranted complexity.** Add code, dependencies, UI, and abstractions only
+   when they earn their place. Prefer reusing an existing seam over inventing a new one; prefer
+   a small pure function over a framework. If a feature can't be justified as *genuinely useful*,
+   it does not go in — never add things for the sake of adding them.
+2. **Efficiency.** Keep startup fast (heavy imports stay lazy), keep the hot paths cheap, and
+   don't do work the user didn't ask for. Advisories are numpy/string-only unless a real model
+   is unavoidable.
+3. **Help/tooltips stay useful and current.** Every non-obvious control carries a concise `info=`
+   tooltip; when behaviour changes, update the tooltip in the same change. Guidance must be
+   accurate — a stale hint is worse than none.
+4. **Sensible defaults, optimized for modern models.** Defaults target current-model dataset
+   building (Flux / Krea 2 / Qwen-Image / SDXL): prose captions by default, 1024 long-side, a
+   modern flow-matching trainer preset, cloud engine for no-GPU users. New controls default to
+   the safe/no-op choice. Re-audit defaults whenever a stage changes.
+5. **README stays human-readable and useful without being long.** Features/why-use-it up top,
+   marketable but accurate, scannable. Trim before adding; deep detail lives in this file.
+6. **Keep every MD file updated in the same change.** `README.md` and `docs/ARCHITECTURE.md`
+   (module map, gotchas, roadmap, version line) must reflect the code as it lands, not later.
+7. **Log genuinely-useful future ideas here, never build them unprompted.** While working, watch
+   for enhancements that fit the project shape and record them under "Further ideas identified"
+   as candidate to-dos — *only if legitimately useful*. Noting is free; building without a green
+   light is not.
+8. **Best practices throughout.** UI/UX and ease of use, security (localhost-only, no secrets on
+   disk, opt-in/outbound-flagged network), coding (typed, tested, `ruff`-clean, honest output —
+   never fake capability), and GitHub hygiene (clear commits, no PRs unless asked, releases when
+   a version bumps). Every version bump updates `studio.__version__` **and** ships a GitHub
+   Release, or the in-app update check never fires.
+
 ## Data flow (full pipeline)
 
 ```
