@@ -46,6 +46,11 @@ class ModelPreset(BaseModel):
     noise_scheduler: str = "flowmatch"
     sample_guidance: float = 4.0
     sample_steps: int = 20
+    # Caption style this base model expects: tag-trained checkpoints (SDXL /
+    # Illustrious / NoobAI / Pony) learn from comma tags, prose models (Flux /
+    # Qwen-Image / Z-Image / Krea) from natural language. Drives the ④→⑤ advisory
+    # that warns when the dataset's captions don't match — nothing else.
+    expects_tags: bool = False
     # musubi training script (…_train_network.py). Placeholder when unverified.
     musubi_script: str = "<<FILL: see musubi docs for this arch>>"
     # kohya-ss sd-scripts training script (SDXL uses sdxl_train_network.py).
@@ -77,12 +82,12 @@ TRAINER_MODELS: dict[str, list[ModelPreset]] = {
         ModelPreset(key="sdxl", label="SDXL 1.0 (base)",
                     name_or_path="stabilityai/stable-diffusion-xl-base-1.0",
                     arch="sdxl", quantize=False, noise_scheduler="ddpm",
-                    sample_guidance=7.0, sample_steps=25),
+                    sample_guidance=7.0, sample_steps=25, expects_tags=True),
         ModelPreset(key="sdxl-custom",
                     label="SDXL-family checkpoint — Pony / Illustrious / NoobAI (set path)",
                     name_or_path="<<FILL: your SDXL-family checkpoint HF id or local path>>",
                     arch="sdxl", quantize=False, noise_scheduler="ddpm",
-                    sample_guidance=7.0, sample_steps=25),
+                    sample_guidance=7.0, sample_steps=25, expects_tags=True),
         ModelPreset(key="zimage", label="Z-Image",
                     name_or_path="<<FILL: Z-Image model path or HF id>>",
                     arch="zimage"),
@@ -108,11 +113,11 @@ TRAINER_MODELS: dict[str, list[ModelPreset]] = {
     "kohya": [
         ModelPreset(key="sdxl", label="SDXL 1.0 (base)",
                     name_or_path="stabilityai/stable-diffusion-xl-base-1.0",
-                    arch="sdxl", kohya_script="sdxl_train_network.py"),
+                    arch="sdxl", kohya_script="sdxl_train_network.py", expects_tags=True),
         ModelPreset(key="sdxl-custom",
                     label="SDXL-family checkpoint — Pony / Illustrious / NoobAI (set path)",
                     name_or_path="<<FILL: your SDXL checkpoint (.safetensors path or HF id)>>",
-                    arch="sdxl", kohya_script="sdxl_train_network.py"),
+                    arch="sdxl", kohya_script="sdxl_train_network.py", expects_tags=True),
     ],
 }
 
@@ -123,6 +128,8 @@ class TrainConfig(BaseModel):
     dataset_dir: Path
     trigger: str = ""
     name: str = "lora"
+    # "character" | "style" | "concept" — only tunes the sample prompt below.
+    dataset_type: str = "character"
     resolution: int = 1024
     rank: int = 16
     alpha: int = 16
@@ -135,8 +142,32 @@ class TrainConfig(BaseModel):
 
 
 def _sample_prompt(cfg: TrainConfig) -> str:
-    who = cfg.trigger or cfg.name or "the character"
+    who = cfg.trigger or cfg.name or "the subject"
+    if cfg.dataset_type == "style":
+        # The trigger is an aesthetic; the prompt names content it renders.
+        return f"{who}, a mountain landscape at sunset"
+    if cfg.dataset_type == "concept":
+        return f"a photo of {who}"
     return f"a photo of {who}, standing outdoors in daylight"
+
+
+def caption_mismatch_warning(preset: ModelPreset, caption_kind: str) -> str:
+    """Advisory line when a dataset's caption style doesn't fit the base model.
+
+    `caption_kind` is 'tags', 'prose', or '' (unknown/uncaptioned → no warning).
+    Never blocks — it only surfaces the likely mismatch so the user can re-caption
+    (③) in the right style before a long training run.
+    """
+    if caption_kind == "prose" and preset.expects_tags:
+        return ("⚠️ Caption/model mismatch: this base model is tag-trained "
+                "(Danbooru/e621), but the dataset's captions look like PROSE. "
+                "Tag-trained checkpoints learn poorly from sentences — consider "
+                "re-captioning in ③ with a tag style or a tagger.")
+    if caption_kind == "tags" and not preset.expects_tags:
+        return ("⚠️ Caption/model mismatch: this base model expects natural-language "
+                "captions, but the dataset's captions look like comma-separated TAGS. "
+                "Consider re-captioning in ③ with the prose style.")
+    return ""
 
 
 def _resolution_list(cfg: TrainConfig) -> str:

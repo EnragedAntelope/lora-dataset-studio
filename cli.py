@@ -55,6 +55,17 @@ def _check_caption_style(style: str) -> str:
     return style
 
 
+def _check_dataset_type(dataset_type: str) -> str:
+    """Validate --dataset-type so a typo fails fast, not silently."""
+    from studio.config import DATASET_TYPES
+
+    dt = dataset_type.strip().lower()
+    if dt not in DATASET_TYPES:
+        raise typer.BadParameter(
+            f"--dataset-type must be one of {', '.join(DATASET_TYPES)}.")
+    return dt
+
+
 def _dress(shots: list) -> list:
     """Fill angle/pose shots with random unisex outfits (close-ups stay blank)."""
     from studio.wardrobe import OUTFIT_SHOT_KINDS, random_outfits
@@ -79,6 +90,9 @@ def preprocess(
     isolation_backend: str = typer.Option(settings.isolation_backend, help="builtin | comfyui"),
     subject_prompt: str = typer.Option("character", help="SAM3 prompt for what to keep"),
     exclude_prompt: str = typer.Option("", help="SAM3 prompt for held props to remove"),
+    tighten: bool = typer.Option(
+        False, "--tighten/--no-tighten",
+        help="Crop to the subject's bounding box after isolation (less white padding)"),
 ):
     """Restore/upscale/isolate images (standalone)."""
     out = out or pipeline.new_run_dir("prepped")
@@ -86,7 +100,7 @@ def preprocess(
         _expand(inputs), out, target=target, force_restore=restore, isolate=isolate,
         subject_prompt=subject_prompt, exclude_prompt=exclude_prompt,
         restore_backend=restore_backend, isolation_backend=isolation_backend,
-        progress=typer.echo)
+        tighten_crop=tighten, progress=typer.echo)
     typer.echo(f"Done: {out}")
 
 
@@ -139,6 +153,12 @@ def caption(
     caption_style: str = typer.Option(
         "prose", "--caption-style",
         help="prose (natural language), tags (Danbooru: SDXL/Illustrious) or e621 (furry/Pony)"),
+    dataset_type: str = typer.Option(
+        "character", "--dataset-type",
+        help="character | style | concept — frames what the caption describes"),
+    sparse: bool = typer.Option(
+        False, "--sparse",
+        help="Style datasets only: trigger + a few words of content (stronger style)"),
     prefix: str = typer.Option(
         "", help="Fixed text added before every caption (e.g. Pony 'score_9, score_8_up')"),
     suffix: str = typer.Option("", help="Fixed text added after every caption"),
@@ -168,6 +188,7 @@ def caption(
     )
 
     style = _check_caption_style(caption_style)
+    dtype = _check_dataset_type(dataset_type)
     try:
         model_override, spec_overrides = resolve_captioner_config(captioner, model)
     except CaptionerConfigError as e:
@@ -179,7 +200,7 @@ def caption(
     caption_folder(folder, captioner, name, trigger, progress=typer.echo,
                    model_override=model_override, spec_overrides=spec_overrides, style=style,
                    prefix=prefix, suffix=suffix, skip_existing=skip_captioned,
-                   blacklist=drop_tags)
+                   blacklist=drop_tags, dataset_type=dtype, sparse=sparse)
 
 
 @app.command()
@@ -207,6 +228,8 @@ def export(
                                          help="Folder(s) of captioned images"),
     name: str = typer.Option("", help="Character name"),
     trigger: str = typer.Option("", help="Trigger word"),
+    dataset_type: str = typer.Option(
+        "character", "--dataset-type", help="character | style | concept (recorded in metadata)"),
     output_root: Path = typer.Option(settings.output_root),
     zip_: bool = typer.Option(False, "--zip", help="Also write a .zip of the dataset"),
     publish_hf: str = typer.Option(
@@ -218,6 +241,7 @@ def export(
     """Package captioned folders into a flat NN.png/NN.txt dataset (standalone)."""
     from studio.package import package_dataset, resolve_export_items
 
+    dtype = _check_dataset_type(dataset_type)
     candidates = [img for folder in folders for img in list_images(folder)]
     res = resolve_export_items(candidates)
     if not res.items:
@@ -227,7 +251,7 @@ def export(
     if skipped:
         typer.echo(f"Skipping {len(skipped)} image(s) without a usable caption: "
                    f"{', '.join(skipped)}")
-    metadata = {"character_name": name, "trigger": trigger,
+    metadata = {"character_name": name, "trigger": trigger, "dataset_type": dtype,
                 "source_folders": [str(f) for f in folders],
                 "skipped_uncaptioned": res.missing, "skipped_empty_caption": res.empties}
     ds = package_dataset(res.items, output_root, name, trigger, metadata)
@@ -258,6 +282,11 @@ def build(
     caption_style: str = typer.Option(
         "prose", "--caption-style",
         help="prose (natural language), tags (Danbooru: SDXL/Illustrious) or e621 (furry/Pony)"),
+    dataset_type: str = typer.Option(
+        "character", "--dataset-type",
+        help="character | style | concept — frames captions + recorded in metadata"),
+    sparse: bool = typer.Option(
+        False, "--sparse", help="Style datasets only: trigger + a few words of content"),
     target: int = typer.Option(settings.target_long_side, help="Long-side resolution"),
     output_root: Path = typer.Option(settings.output_root),
     restore: bool = typer.Option(None, "--restore/--no-restore",
@@ -265,6 +294,9 @@ def build(
     max_shots: int = typer.Option(0, help="Limit number of shots (0 = full plan)"),
     isolate: bool = typer.Option(True, "--isolate/--no-isolate",
                                  help="Cut out subject, drop background/props"),
+    tighten: bool = typer.Option(
+        False, "--tighten/--no-tighten",
+        help="Crop to the subject's bounding box after isolation (less white padding)"),
     subject_prompt: str = typer.Option("character", help="SAM3 prompt for what to keep"),
     exclude_prompt: str = typer.Option("", help="SAM3 prompt for held props to remove"),
     cloud_model: str = typer.Option("", help=f"Cloud image model (default {settings.gemini_image_model})"),
@@ -286,13 +318,14 @@ def build(
     from studio.package import package_dataset
 
     style = _check_caption_style(caption_style)
+    dtype = _check_dataset_type(dataset_type)
     run_dir = pipeline.new_run_dir(name or trigger)
     typer.echo(f"Run dir: {run_dir}")
 
     reports = pipeline.preprocess_sources(
         _expand(images), run_dir / "prepped", target=target, force_restore=restore,
         isolate=isolate, subject_prompt=subject_prompt, exclude_prompt=exclude_prompt,
-        progress=typer.echo)
+        tighten_crop=tighten, progress=typer.echo)
 
     shots = default_plan(subject=f"character {name}" if name else "the character")
     if max_shots:
@@ -312,10 +345,12 @@ def build(
 
     all_images = [r.output for r in reports] + kept
     items = caption_images(all_images, captioner, name, trigger, progress=typer.echo,
-                           style=style, prefix=prefix, suffix=suffix, blacklist=drop_tags)
+                           style=style, prefix=prefix, suffix=suffix, blacklist=drop_tags,
+                           dataset_type=dtype, sparse=sparse)
     metadata = {
         "character_name": name,
         "trigger": trigger,
+        "dataset_type": dtype,
         "engine": engine,
         "captioner": captioner,
         "caption_style": style,

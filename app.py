@@ -70,6 +70,47 @@ RESTORE_BACKEND_CHOICES = [
     ("Basic (Lanczos only, no ComfyUI)", "basic"),
 ]
 
+# Global dataset-type selector — a deliberate, documented exception to the
+# "no global mode" design rule (a dataset IS one type; per-tab type controls
+# invite mismatch). It only tunes prompts/defaults; stages still run standalone.
+DATASET_TYPE_CHOICES = [
+    ("Character — a person/creature identity (default)", "character"),
+    ("Style — an art style / aesthetic", "style"),
+    ("Concept — an object, action, or idea", "concept"),
+]
+_YT_TOOL = "https://github.com/EnragedAntelope/youtube-screenshot-extractor"
+_TYPE_GUIDANCE = {
+    "character": "",
+    "style": (f"**Style dataset** — ② synthetic generation is Character-only. Collect your "
+              f"own images that share the look (a [YouTube Screenshot Extractor]({_YT_TOOL}) "
+              "can pull high-quality frames from video), then go straight to **③ Caption → "
+              "④ Export → ⑤ Train**. Caption the *content*, not the style — the trigger learns "
+              "the look. Isolation defaults **off** (a style is whole-image)."),
+    "concept": (f"**Concept dataset** — ② synthetic generation is Character-only for now. Bring "
+                f"your own images of the object/action/idea (a [YouTube Screenshot Extractor]"
+                f"({_YT_TOOL}) helps), then go to **③ Caption**. Caption the *context*, not the "
+                "concept's fixed form. Isolation defaults **on** (good for objects); turn it off "
+                "for scenes/actions."),
+}
+_TRIGGER_INFO = {
+    "character": "Unique token the LoRA learns as the subject. Placed first in every caption.",
+    "style": "Unique token the LoRA learns as the STYLE/aesthetic. Placed first in every caption.",
+    "concept": "Unique token the LoRA learns as the CONCEPT. Placed first in every caption.",
+}
+
+
+def on_dataset_type_change(dataset_type: str):
+    """Retune the type-dependent controls: ① isolation default, ② guidance copy,
+    ③ trigger tooltip, and the Style-only sparse-caption toggle. The Character UI
+    is byte-identical to before when type=Character."""
+    guidance = _TYPE_GUIDANCE.get(dataset_type, "")
+    return (
+        gr.Checkbox(value=(dataset_type != "style")),  # ① isolate default
+        gr.Markdown(value=guidance, visible=bool(guidance)),  # ② guidance
+        gr.Textbox(info=_TRIGGER_INFO.get(dataset_type, _TRIGGER_INFO["character"])),
+        gr.Checkbox(visible=(dataset_type == "style")),  # ③ sparse (style only)
+    )
+
 
 # ---------- helpers ----------
 
@@ -212,7 +253,7 @@ def _gen_gallery(results: list[pipeline.GenResult]):
 
 def do_preprocess(files: list[str], folder: str, target: int, restore_mode: str,
                   restore_backend: str, isolate: bool, isolation_backend: str,
-                  subject_prompt: str, exclude_prompt: str):
+                  subject_prompt: str, exclude_prompt: str, tighten: bool = False):
     sources = _inputs(files, folder)
     out_dir = _stamped("prepped")
     force = {"Auto (only if needed)": None, "Always": True, "Never": False}[restore_mode]
@@ -222,7 +263,7 @@ def do_preprocess(files: list[str], folder: str, target: int, restore_mode: str,
             sources, out_dir, target=target, force_restore=force, isolate=isolate,
             subject_prompt=subject_prompt or "character",
             exclude_prompt=exclude_prompt or "", restore_backend=restore_backend,
-            isolation_backend=isolation_backend, progress=log.append)
+            isolation_backend=isolation_backend, tighten_crop=tighten, progress=log.append)
     except Exception as e:
         raise gr.Error(f"Preprocess failed: {e}")
     gallery = [(str(r.output), f"{r.source.name}: {r.reason}") for r in reports]
@@ -361,7 +402,8 @@ def _tagger_overrides(captioner_key: str, spec_overrides, gen_thr, char_thr,
 def do_test_caption(folder: str, selected: list[str], captioner_key: str,
                     name: str, trigger: str, gemini_model: str, style: str,
                     gen_thr: float, char_thr: float, prefix: str, suffix: str,
-                    blacklist: str, rating: bool, underscores: bool):
+                    blacklist: str, rating: bool, underscores: bool,
+                    dataset_type: str = "character", sparse: bool = False):
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select at least one image first.")
     path = Path(folder.strip()) / selected[0]
@@ -373,12 +415,14 @@ def do_test_caption(folder: str, selected: list[str], captioner_key: str,
                                        rating, underscores)
     cap = Captioner(captioner_key, model_override=model_override, spec_overrides=spec_overrides)
     try:
-        raw = cap.caption(path, subject=name or "the character", style=style)
+        raw = cap.caption(path, subject=name or "the character", style=style,
+                          dataset_type=dataset_type, sparse=sparse)
     except Exception as e:
         raise gr.Error(str(e))
     finally:
         cap.unload()
-    caption = finalize_caption(raw, trigger, name, SUBJECT_ALIASES, style=style)
+    caption = finalize_caption(raw, trigger, name, SUBJECT_ALIASES, style=style,
+                               dataset_type=dataset_type)
     caption = drop_blacklisted_tags(caption, parse_blacklist(blacklist), style)
     return apply_affixes(caption, prefix, suffix, style)
 
@@ -422,7 +466,8 @@ def do_caption(folder: str, selected: list[str], captioner_key: str,
                name: str, trigger: str, gemini_model: str, style: str,
                gen_thr: float, char_thr: float, prefix: str, suffix: str,
                blacklist: str, rating: bool, underscores: bool,
-               skip_existing: bool, exp_folders_prev: str, exp_name_prev: str,
+               skip_existing: bool, dataset_type: str, sparse: bool,
+               exp_folders_prev: str, exp_name_prev: str,
                exp_trigger_prev: str, progress=gr.Progress()):
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select the images to caption first.")
@@ -441,7 +486,8 @@ def do_caption(folder: str, selected: list[str], captioner_key: str,
         items = caption_images(images, captioner_key, name, trigger, progress=report,
                                model_override=model_override, spec_overrides=spec_overrides,
                                style=style, prefix=prefix, suffix=suffix,
-                               skip_existing=skip_existing, blacklist=blacklist)
+                               skip_existing=skip_existing, blacklist=blacklist,
+                               dataset_type=dataset_type, sparse=sparse)
     except Exception as e:
         raise gr.Error(f"Captioning failed: {e}")
     for img, caption in items:
@@ -539,7 +585,7 @@ def load_export_preview(folders_text: str, dup_distance: float = 5):
 
 
 def do_export(selected: list[str], name: str, trigger: str, output_root: str,
-              make_zip: bool = False):
+              make_zip: bool = False, dataset_type: str = "character"):
     if not selected:
         raise gr.Error("Click '📂 Load & preview', then keep at least one image checked.")
     from studio.package import package_dataset, resolve_export_items
@@ -551,6 +597,7 @@ def do_export(selected: list[str], name: str, trigger: str, output_root: str,
                        "run ③ Caption first (each export needs a non-empty .txt).")
     source_folders = sorted({str(p.parent) for p in paths})
     metadata = {"character_name": name, "trigger": trigger,
+                "dataset_type": dataset_type,
                 "source_folders": source_folders,
                 "skipped_uncaptioned": res.missing,
                 "skipped_empty_caption": res.empties}
@@ -711,7 +758,7 @@ def inspect_dataset(dataset_dir: str) -> tuple[str, gr.Number]:
 def do_generate_train_config(trainer: str, model_key: str, dataset_dir: str,
                              install_path: str, name: str, trigger: str,
                              resolution, rank, alpha, steps, lr, batch_size,
-                             multi_res: bool) -> str:
+                             multi_res: bool, dataset_type: str = "character") -> str:
     if not dataset_dir.strip():
         raise gr.Error("Enter the dataset folder to write the config into "
                        "(④ Export produces one and auto-fills this).")
@@ -725,10 +772,12 @@ def do_generate_train_config(trainer: str, model_key: str, dataset_dir: str,
     stats = inspect(ds)
     if not stats.n_images:
         raise gr.Error(f"No images found in {ds} — export a dataset first (④).")
+    preset = _preset(trainer, model_key)
     buckets = stats.buckets_for(int(resolution)) if multi_res else []
     cfg = TrainConfig(
-        trainer=trainer, model=_preset(trainer, model_key), dataset_dir=ds,
+        trainer=trainer, model=preset, dataset_dir=ds,
         trigger=trigger.strip(), name=(name.strip() or "lora"),
+        dataset_type=dataset_type,
         resolution=int(resolution), rank=int(rank), alpha=int(alpha),
         steps=int(steps), lr=float(lr), batch_size=int(batch_size),
         buckets=buckets)
@@ -749,6 +798,13 @@ def do_generate_train_config(trainer: str, model_key: str, dataset_dir: str,
         caveat = ("\n\n⚠️ kohya sd-scripts: SDXL base runs from the HF id shown; for a "
                   "Pony / Illustrious / NoobAI checkpoint, replace the <<FILL>> pretrained "
                   "path. Verify flags against the sd-scripts docs before a long run.")
+    # Advisory ④→⑤ sanity check: do the dataset's captions fit this base model?
+    from studio.caption_lint import folder_caption_kind
+    from studio.trainer_configs import caption_mismatch_warning
+
+    mismatch = caption_mismatch_warning(preset, folder_caption_kind(ds))
+    if mismatch:
+        caveat += f"\n\n{mismatch}"
     return (f"✅ Wrote:\n{files}\n\nDataset: {stats.n_images} images, "
             f"{stats.min_long_side}-{stats.max_long_side}px long side{bucket_note}\n\n"
             f"Run it with:\n{command}{caveat}\n\n"
@@ -798,9 +854,11 @@ def _check_for_update():
 with gr.Blocks(title="LoRA Dataset Studio") as demo:
     gr.Markdown(
         "# LoRA Dataset Studio\n"
-        "One image → ready-to-train character LoRA dataset. Every tab works standalone "
+        "Character, style, or concept → ready-to-train LoRA dataset. Every tab works standalone "
         "on any folder — or run them in order and each step auto-fills the next: "
-        "**① Preprocess → ② Generate & curate → ③ Caption → ④ Export → ⑤ Train config**."
+        "**① Preprocess → ② Generate & curate → ③ Caption → ④ Export → ⑤ Train config**. "
+        "Pick the **Dataset type** below (Character generates a multi-angle set in ②; "
+        "Style & Concept bring their own images and start at ③)."
     )
     gr.Markdown(
         "> ⚠️ **Cloud options cost money and you are responsible for what you make.** "
@@ -831,6 +889,11 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
             "- This software is provided under the MIT License **with no warranty**; the authors are "
             "not liable for your use of it, for provider charges, or for content you create with it."
         )
+    dataset_type = gr.Radio(
+        DATASET_TYPE_CHOICES, value="character", label="Dataset type",
+        info="What the LoRA learns. Character generates a multi-angle set in ②; "
+             "Style & Concept bring their own images and start at ③ Caption. Tunes "
+             "caption framing, the ① isolation default, and the ⑤ sample prompt.")
     results_state = gr.State([])
 
     with gr.Tabs():
@@ -873,6 +936,10 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                         placeholder="microphone, microphone stand",
                         info="Usually leave blank — SAM3 already excludes most props. Use only "
                              "for a prop fused into the subject.")
+                    pre_tighten = gr.Checkbox(
+                        value=False, label="Tighten crop to subject (after isolation)",
+                        info="Crop out the white padding around the isolated subject so framing "
+                             "is consistent and less empty background is trained. Needs isolation on.")
                     btn_pre = gr.Button("① Preprocess", variant="primary")
                 with gr.Column(scale=2):
                     pre_note = gr.Markdown()
@@ -882,6 +949,9 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
             gr.Markdown("Turn reference image(s) into a full shot set. Each plan row becomes "
                         "one generated image; `chain_from` makes rear views build on a "
                         "generated side view.")
+            # Type-specific guidance (Style/Concept collect their own images); hidden
+            # for Character. Updated by the header dataset-type selector.
+            gen_type_note = gr.Markdown(visible=False)
             with gr.Row():
                 with gr.Column(scale=1):
                     gen_files = gr.File(label="Reference image(s)", file_count="multiple",
@@ -992,6 +1062,12 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                              "vocabularies — pick the one your base model was trained on. The "
                              "trigger stays first either way. (The 'Local tagger' captioners "
                              "ignore this and always emit canonical tags.)")
+                    cap_sparse = gr.Checkbox(
+                        value=False, label="Sparse captions (Style datasets only)",
+                        visible=False,
+                        info="Caption only the trigger plus a few words of content. Stronger "
+                             "style transfer, but the trigger may absorb some content. "
+                             "Ignored for Character/Concept.")
                     with gr.Accordion("Tag options (taggers & tag styles)", open=False):
                         gr.Markdown(
                             "Fixed **prefix/suffix** ride on every caption — e.g. Pony's "
@@ -1201,10 +1277,14 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
     btn_pre.click(
         do_preprocess,
         [pre_files, pre_folder, target, restore_mode, restore_backend, isolate,
-         isolation_backend, subject_prompt, exclude_prompt],
+         isolation_backend, subject_prompt, exclude_prompt, pre_tighten],
         [prep_gallery, pre_note, log_box, gen_src_folder, cap_folder]) \
            .then(lambda s, e: (s, e), [subject_prompt, exclude_prompt],
                  [gen_subject, gen_exclude])
+
+    # Header dataset-type selector retunes type-dependent controls across tabs.
+    dataset_type.change(on_dataset_type_change, [dataset_type],
+                        [isolate, gen_type_note, cap_trigger, cap_sparse])
 
     refresh.click(refresh_plan, [gen_name], [plan])
     btn_outfits.click(randomize_outfits, [plan], [plan, plan_note])
@@ -1261,13 +1341,13 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
     btn_test.click(do_test_caption,
                    [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model,
                     cap_style, cap_gen_thr, cap_char_thr, cap_prefix, cap_suffix,
-                    cap_blacklist, cap_rating, cap_underscores],
+                    cap_blacklist, cap_rating, cap_underscores, dataset_type, cap_sparse],
                    [test_caption])
     btn_caption.click(
         do_caption,
         [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model, cap_style,
          cap_gen_thr, cap_char_thr, cap_prefix, cap_suffix,
-         cap_blacklist, cap_rating, cap_underscores, cap_skip,
+         cap_blacklist, cap_rating, cap_underscores, cap_skip, dataset_type, cap_sparse,
          exp_folders, exp_name, exp_trigger],
         [cap_gallery, cap_select, cap_result, log_box, exp_folders, exp_name, exp_trigger,
          cap_analysis]) \
@@ -1276,7 +1356,8 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
 
     btn_load_preview.click(load_export_preview, [exp_folders, exp_dup_dist],
                            [exp_gallery, exp_select, exp_preview_note])
-    btn_export.click(do_export, [exp_select, exp_name, exp_trigger, output_root, exp_zip],
+    btn_export.click(do_export,
+                     [exp_select, exp_name, exp_trigger, output_root, exp_zip, dataset_type],
                      [exp_result, tr_dataset, exp_ds_dir]) \
               .then(inspect_dataset, [tr_dataset], [tr_stats, tr_steps]) \
               .then(_fill_if_empty, [tr_name, exp_name], [tr_name]) \
@@ -1292,7 +1373,7 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
     btn_inspect.click(inspect_dataset, [tr_dataset], [tr_stats, tr_steps])
     tr_gen.click(do_generate_train_config,
                  [tr_trainer, tr_model, tr_dataset, tr_path, tr_name, tr_trigger]
-                 + tr_hparams + [tr_multi_res],
+                 + tr_hparams + [tr_multi_res, dataset_type],
                  [tr_result])
 
     demo.load(_check_for_update, None, update_notice)

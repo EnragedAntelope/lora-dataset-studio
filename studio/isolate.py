@@ -166,6 +166,31 @@ def isolate_builtin(image_path: Path, out_path: Path, subject_prompt: str = "cha
     return out_path
 
 
+def crop_to_content(image: Image.Image, bg_tolerance: int = 8,
+                    margin_frac: float = 0.02) -> Image.Image:
+    """Crop an isolated (subject-on-white) image to the subject's bounding box.
+
+    Both isolation backends composite the subject onto a plain white background, so
+    the subject's bounding box is simply the extent of the non-white pixels — no
+    mask needed, which keeps this backend-agnostic and pure numpy. A small margin
+    (fraction of the long side) is left around the subject. Tightens framing across
+    a set and trains less empty white padding. If the image is effectively all
+    white (nothing found), it is returned unchanged.
+    """
+    arr = np.asarray(image.convert("RGB")).astype(np.int16)
+    nonbg = np.any(255 - arr > bg_tolerance, axis=-1)  # anything darker than white
+    if not nonbg.any():
+        return image
+    rows = np.where(nonbg.any(axis=1))[0]
+    cols = np.where(nonbg.any(axis=0))[0]
+    y0, y1 = int(rows[0]), int(rows[-1])
+    x0, x1 = int(cols[0]), int(cols[-1])
+    margin = round(max(image.width, image.height) * max(0.0, margin_frac))
+    y0, x0 = max(0, y0 - margin), max(0, x0 - margin)
+    y1, x1 = min(image.height - 1, y1 + margin), min(image.width - 1, x1 + margin)
+    return image.crop((x0, y0, x1 + 1, y1 + 1))
+
+
 # ---------- comfyui backend ----------
 
 def isolate_comfyui(image_path: Path, out_path: Path, subject_prompt: str = "character",

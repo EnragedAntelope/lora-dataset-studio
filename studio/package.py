@@ -77,6 +77,16 @@ def package_dataset(
         jsonl_lines.append(json.dumps({"file_name": f"{stem}.png", "text": caption}))
     (ds_dir / "metadata.jsonl").write_text("\n".join(jsonl_lines) + "\n", encoding="utf-8")
 
+    # Record the detected caption style (tags vs prose) unless the caller already
+    # supplied one — so the ⑤ Train tab (and a human reader) can sanity-check it
+    # against the chosen base model. Detection reuses the tag-vs-prose heuristic.
+    if "caption_style" not in metadata:
+        from studio.caption_lint import looks_like_tags
+
+        captions = [c for _, c in items if c.strip()]
+        if captions:
+            metadata = {**metadata, "caption_style": "tags" if looks_like_tags(captions)
+                        else "prose"}
     metadata = {"created": datetime.now().isoformat(timespec="seconds"), **metadata}
     (ds_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
 

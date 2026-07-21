@@ -141,12 +141,14 @@ class Captioner:
     # ---------- shared ----------
 
     def caption(self, image_path: Path, subject: str = "the character",
-                style: str = "prose") -> str:
+                style: str = "prose", dataset_type: str = "character",
+                sparse: bool = False) -> str:
         if self.spec.backend == "wd_tagger":
-            # A dedicated tagger emits Danbooru tags directly; the prose/tags/e621
-            # style selector and the subject don't apply to it.
+            # A dedicated tagger emits canonical tags directly from image features;
+            # the prose/tags/e621 selector, the subject, and the dataset type (a
+            # framing hint for VLMs) don't apply to it.
             return ", ".join(self._load_tagger().tag(image_path))
-        instruction = self.spec.prompt_for(style).format(subject=subject)
+        instruction = self.spec.prompt_for(style, dataset_type, sparse).format(subject=subject)
         if self.spec.backend == "openai":
             return _clean(self._caption_openai(image_path, instruction))
         if self.spec.backend == "gemini":
@@ -413,23 +415,30 @@ def _has_caption(image: Path) -> bool:
 
 
 def finalize_caption(raw: str, trigger: str, character_name: str, aliases: list[str],
-                     style: str = "prose") -> str:
+                     style: str = "prose", dataset_type: str = "character") -> str:
     """Apply the dataset caption template: trigger first, consistent naming.
 
     `style="tags"` (Danbooru) and `style="e621"` (furry/anthro) both produce a
     comma-separated tag caption — they differ only in the vocabulary the model
-    was asked for, not the output shape — so they share the tag finalizer. The
-    default "prose" keeps the natural-language behaviour.
+    was asked for, not the output shape — so they share the tag finalizer (already
+    identity-free, so `dataset_type` doesn't change it). The default "prose" keeps
+    the natural-language behaviour.
+
+    `dataset_type="character"` (the default) is unchanged. Style/Concept prose is
+    trigger-first with **no** alias→name replacement: there is no "the woman"→name
+    mapping for a look or an object, so only the trigger is placed first.
     """
     if style in ("tags", "e621"):
         return _finalize_tags(raw, trigger)
     caption = raw
-    if character_name:
+    if dataset_type == "character" and character_name:
         # Replace generic nouns the VLM used for the subject with the real name
         for alias in aliases:
             caption = re.sub(rf"\bthe {re.escape(alias)}\b", character_name, caption, flags=re.I)
     if trigger and not caption.lower().startswith(trigger.lower()):
-        if caption and not (character_name and caption.startswith(character_name.split()[0])):
+        keep_name = (dataset_type == "character" and character_name
+                     and caption.startswith(character_name.split()[0]))
+        if caption and not keep_name:
             caption = f"{caption[0].lower()}{caption[1:]}"  # don't lowercase a proper name
         caption = f"{trigger}, {caption}" if caption else trigger
     return caption
@@ -451,11 +460,15 @@ def caption_images(
     suffix: str = "",
     skip_existing: bool = False,
     blacklist: str = "",
+    dataset_type: str = "character",
+    sparse: bool = False,
 ) -> list[tuple[Path, str]]:
     """Caption a list of images. Standalone — no run/pipeline state needed.
 
     `style` is "prose" (natural language), "tags" (Danbooru comma list) or
-    "e621" (furry/anthro comma list). `prefix`/`suffix` wrap every caption (for
+    "e621" (furry/anthro comma list). `dataset_type` ("character"/"style"/
+    "concept") frames what the caption describes; `sparse` is a Style-only
+    minimal-caption variant. `prefix`/`suffix` wrap every caption (for
     quality/score tags); `blacklist` is a comma/newline drop-list of noisy tags
     to strip (tag styles only); `skip_existing` leaves images that already have a
     non-empty .txt untouched. Returns (image_path, finalized_caption) pairs; the
@@ -497,9 +510,10 @@ def caption_images(
     try:
         for i, p in enumerate(images, 1):
             progress(f"Captioning {i}/{len(images)}: {p.name}")
-            raw = cap.caption(p, subject=subject, style=style)
+            raw = cap.caption(p, subject=subject, style=style,
+                              dataset_type=dataset_type, sparse=sparse)
             cap_text = finalize_caption(raw, trigger, character_name, SUBJECT_ALIASES,
-                                        style=style)
+                                        style=style, dataset_type=dataset_type)
             # Drop noisy tags before affixes so a fixed prefix/suffix survives.
             cap_text = drop_blacklisted_tags(cap_text, drop, style)
             items.append((p, apply_affixes(cap_text, prefix, suffix, style)))
@@ -522,12 +536,16 @@ def caption_folder(
     suffix: str = "",
     skip_existing: bool = False,
     blacklist: str = "",
+    dataset_type: str = "character",
+    sparse: bool = False,
 ) -> list[tuple[Path, str]]:
     """Caption images in `folder` (all, or the subset in `only`) and write
     .txt sidecars next to each image. The classic 'point at a folder and tag
-    it' mode. `style` is "prose", "tags" (Danbooru) or "e621"; `prefix`/`suffix`
-    wrap every caption; `blacklist` drops noisy tags (tag styles only);
-    `skip_existing` leaves already-captioned images alone."""
+    it' mode. `style` is "prose", "tags" (Danbooru) or "e621"; `dataset_type`
+    frames the caption (character/style/concept) and `sparse` is a Style-only
+    minimal-caption variant; `prefix`/`suffix` wrap every caption; `blacklist`
+    drops noisy tags (tag styles only); `skip_existing` leaves already-captioned
+    images alone."""
     from studio.config import list_images
 
     images = only if only else list_images(folder)
@@ -536,7 +554,8 @@ def caption_folder(
     items = caption_images(images, captioner_key, character_name, trigger, progress,
                            model_override=model_override, spec_overrides=spec_overrides,
                            style=style, prefix=prefix, suffix=suffix,
-                           skip_existing=skip_existing, blacklist=blacklist)
+                           skip_existing=skip_existing, blacklist=blacklist,
+                           dataset_type=dataset_type, sparse=sparse)
     for img, caption in items:
         img.with_suffix(".txt").write_text(caption, encoding="utf-8")
     progress(f"Wrote {len(items)} .txt sidecar(s) in {folder}")

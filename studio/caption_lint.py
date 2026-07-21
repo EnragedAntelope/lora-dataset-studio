@@ -30,6 +30,26 @@ def _words(caption: str) -> list[str]:
     return caption.split()
 
 
+# CLIP text encoders (SDXL / Illustrious / NoobAI / Pony) hard-truncate at 77
+# tokens including the BOS/EOS markers, silently dropping everything past it.
+CLIP_TOKEN_LIMIT = 77
+
+
+def estimate_clip_tokens(caption: str) -> int:
+    """Rough CLIP-token count WITHOUT loading a tokenizer (best-effort estimate).
+
+    CLIP uses BPE, so a word is often more than one token; English averages a bit
+    over one token per word, and each comma in a tag list is its own token. We use
+    ~1.3 tokens/word + one per comma + two for the BOS/EOS markers, and round up —
+    deliberately erring high so the 77-token truncation warning fires a little
+    early rather than missing a caption that will actually be cut. Exactness would
+    need the real CLIP tokenizer (kept as a possible future dependency).
+    """
+    words = len(_words(caption))
+    commas = caption.count(",")
+    return math.ceil(words * 1.3) + commas + 2
+
+
 def _norm(text: str) -> str:
     """Collapse whitespace + lowercase — the comparison form for tags/captions."""
     return " ".join(text.split()).lower()
@@ -42,18 +62,22 @@ class LintReport:
     empty: list[str] = field(default_factory=list)
     short: list[str] = field(default_factory=list)
     missing_trigger: list[str] = field(default_factory=list)
+    # Captions estimated to exceed CLIP's 77-token limit (tag datasets only).
+    too_long: list[str] = field(default_factory=list)
     # (caption preview, [image names]) for captions repeated verbatim.
     duplicates: list[tuple[str, list[str]]] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
-        return not (self.empty or self.short or self.missing_trigger or self.duplicates)
+        return not (self.empty or self.short or self.missing_trigger
+                    or self.too_long or self.duplicates)
 
 
 def lint_captions(
     pairs: Iterable[tuple[str, str]],
     trigger: str = "",
     min_words: int = 2,
+    clip_limit: int = 0,
 ) -> LintReport:
     """Flag empty / too-short / trigger-missing / duplicate captions.
 
@@ -61,7 +85,9 @@ def lint_captions(
     (a caption with fewer words is flagged "short") so the advisory only fires on
     near-junk, never on a legitimately concise caption. Duplicate detection is on
     the normalized (whitespace-collapsed, lowercased) caption and only reports
-    non-empty captions shared by 2+ images. Order-preserving.
+    non-empty captions shared by 2+ images. `clip_limit` (>0) additionally flags
+    captions whose estimated CLIP-token count exceeds it — used for tag datasets,
+    where SDXL-family encoders truncate at 77. Order-preserving.
     """
     pairs = list(pairs)
     trig = _norm(trigger)
@@ -76,6 +102,8 @@ def lint_captions(
             report.short.append(name)
         if trig and not _norm(text).startswith(trig):
             report.missing_trigger.append(name)
+        if clip_limit and estimate_clip_tokens(text) > clip_limit:
+            report.too_long.append(name)
         seen.setdefault(_norm(text), []).append(name)
     for norm_text, names in seen.items():
         if len(names) > 1:
@@ -139,13 +167,33 @@ def analyze_pairs(
     """(health report, ubiquitous tags) for (name, caption) pairs.
 
     The tag report is only computed for tag-like captions (empty otherwise), so
-    prose datasets get the health lint without a meaningless frequency list.
+    prose datasets get the health lint without a meaningless frequency list. The
+    CLIP 77-token truncation check is likewise gated to tag-like captions (that is
+    where the SDXL-family encoders that truncate live; prose Flux/T5 encoders do
+    not have the 77-token cap), so prose datasets are never nagged about length.
     """
     pairs = list(pairs)
-    report = lint_captions(pairs, trigger=trigger)
     captions = [c for _, c in pairs if c.strip()]
-    ubiquitous = ubiquitous_tags(captions, trigger) if looks_like_tags(captions) else []
+    is_tags = looks_like_tags(captions)
+    report = lint_captions(pairs, trigger=trigger,
+                           clip_limit=CLIP_TOKEN_LIMIT if is_tags else 0)
+    ubiquitous = ubiquitous_tags(captions, trigger) if is_tags else []
     return report, ubiquitous
+
+
+def folder_caption_kind(folder: Path) -> str:
+    """Heuristic caption kind for a folder: 'tags', 'prose', or '' if uncaptioned.
+
+    Used by the ④→⑤ sanity check to warn when a dataset's captions don't match the
+    trainer preset (tag captions for a prose model or vice-versa). Reuses the same
+    `looks_like_tags` heuristic the tag-frequency report is gated on.
+    """
+    from studio.config import list_images
+
+    captions = [c for img in list_images(folder) if (c := _read_caption(img))]
+    if not captions:
+        return ""
+    return "tags" if looks_like_tags(captions) else "prose"
 
 
 def analyze_folder(
@@ -186,6 +234,10 @@ def markdown_summary(
                          f"{_names(report.missing_trigger)}")
         if report.short:
             lines.append(f"- ⚠ **{len(report.short)} very short:** {_names(report.short)}")
+        if report.too_long:
+            lines.append(f"- ✂️ **{len(report.too_long)} likely over CLIP's 77-token "
+                         f"limit** (SDXL/Illustrious/Pony will truncate; token estimate): "
+                         f"{_names(report.too_long)}")
         if report.duplicates:
             groups = "; ".join(f"{_names(names)} = “{preview}”"
                                for preview, names in report.duplicates[:5])

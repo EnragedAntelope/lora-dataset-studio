@@ -85,6 +85,7 @@ def preprocess(
     exclude_prompt: str = "",
     restore_backend: str = "",
     isolation_backend: str = "",
+    tighten_crop: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> PreprocessReport:
     """Copy + clean one source image into `work_dir` at target resolution.
@@ -92,6 +93,8 @@ def preprocess(
     force_restore: True = always restore, False = never, None = auto-decide.
     isolate: cut out the subject so backgrounds and props don't leak into
     generations or the dataset.
+    tighten_crop: after isolation, crop to the subject's bounding box (less white
+    padding, more consistent framing). No effect unless `isolate` is on.
     """
     target = target or settings.target_long_side
     restore_backend = restore_backend or settings.restore_backend
@@ -125,6 +128,11 @@ def preprocess(
         stage_path = out_path
 
     img = Image.open(stage_path).convert("RGB")
+    if isolate and tighten_crop:
+        # Crop the subject-on-white composite to its bounding box before resizing.
+        from studio.isolate import crop_to_content
+
+        img = crop_to_content(img)
     img = _resize_to_target(img, target)
     img.save(out_path, "PNG")
     return PreprocessReport(

@@ -140,8 +140,10 @@ def test_apply_affixes_empty_is_noop() -> None:
 # ---------- caption_images: skip_existing + affixes (no real model) ----------
 
 def _stub_model(monkeypatch, text: str) -> None:
-    monkeypatch.setattr(C.Captioner, "caption",
-                        lambda self, image_path, subject="the character", style="prose": text)
+    monkeypatch.setattr(
+        C.Captioner, "caption",
+        lambda self, image_path, subject="the character", style="prose",
+        dataset_type="character", sparse=False: text)
     monkeypatch.setattr(C.Captioner, "load", lambda self: None)
     monkeypatch.setattr(C.Captioner, "unload", lambda self: None)
 

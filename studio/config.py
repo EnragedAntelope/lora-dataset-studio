@@ -47,10 +47,13 @@ _JOYCAPTION_PROMPT = (
 )
 
 # The NSFW-Caption finetune responds best when explicitness is requested plainly.
-_NSFW_PROMPT = _BASE_PROMPT + (
+# Kept as a shared constant so the Style/Concept composer can reuse the exact
+# clause (detecting an NSFW spec by its presence) rather than string-sniffing.
+_NSFW_PLAINNESS = (
     " If the image contains nudity or explicit content, describe it plainly and "
     "directly without euphemism."
 )
+_NSFW_PROMPT = _BASE_PROMPT + _NSFW_PLAINNESS
 
 # --- Booru-tag caption style -------------------------------------------------
 # SDXL/Pony/Illustrious LoRAs are trained on comma-separated Danbooru-style tags,
@@ -116,6 +119,47 @@ _NSFW_E621_PROMPT = _BASE_E621_PROMPT + (
     "directly without euphemism."
 )
 
+# --- Dataset types (Character / Style / Concept) -----------------------------
+# A dataset is ONE type: the trigger learns an identity (character), an aesthetic
+# (style), or an object/action/idea (concept). Character is the tuned default and
+# keeps its per-model templates verbatim. Style/Concept captions instead COMPOSE
+# their instruction from a per-type *framing* clause + the prose/tags/e621 *format*
+# directive, so we don't store nine extra templates per captioner (anti-bloat).
+DATASET_TYPES = ("character", "style", "concept")
+
+# Framing: WHAT to describe (and what NOT to). The constant look/form is what the
+# trigger learns, so the caption must describe everything *except* it.
+_STYLE_FRAMING = (
+    "Describe the CONTENT of this image for an image-generation training caption: "
+    "the subjects, objects, setting and composition. Do NOT describe the artistic "
+    "style, medium, colour palette, line work, or rendering technique — that constant "
+    "look is learned from the trigger and must not be spelled out."
+)
+_STYLE_SPARSE_FRAMING = (
+    "Give a very short caption for this image: name only the main subject or content "
+    "in at most a few words. Do NOT describe the artistic style, medium, colour, or "
+    "rendering technique."
+)
+_CONCEPT_FRAMING = (
+    "Describe the CONTEXT of this image for an image-generation training caption: the "
+    "surrounding setting and background, and how the main subject is placed, posed or "
+    "used. Do NOT describe the fixed form of the concept itself — that is learned from "
+    "the trigger and must not be spelled out."
+)
+# Format: HOW to shape the output. Shared by both non-character types.
+_FORMAT_DIRECTIVE = {
+    "prose": "Write one flowing paragraph of natural language. Output only the caption.",
+    "tags": "Output a single comma-separated list of concise lowercase Danbooru-style "
+            "tags (one attribute per tag), no sentences. Output only the tags.",
+    "e621": "Output a single comma-separated list of concise lowercase e621-style tags "
+            "(one attribute per tag), no sentences. Output only the tags.",
+}
+_PLAINNESS_DIRECTIVE = {
+    "prose": " If the content is explicit, describe it plainly without euphemism.",
+    "tags": " If the content is explicit, tag it plainly without euphemism.",
+    "e621": " If the content is explicit, tag it plainly without euphemism.",
+}
+
 
 class CaptionerSpec(BaseModel):
     key: str
@@ -155,19 +199,51 @@ class CaptionerSpec(BaseModel):
     nsfw_capable: bool = True
     cost_note: str = "free"
 
-    def prompt_for(self, style: str) -> str:
-        """The instruction template for the requested caption style.
+    def prompt_for(self, style: str, dataset_type: str = "character",
+                   sparse: bool = False) -> str:
+        """The instruction template for the requested caption style + dataset type.
 
         `style="tags"` selects the Danbooru-tag template, `style="e621"` the
         e621 (furry/anthro) one; anything else (the default "prose") selects the
         natural-language template. Unknown styles fall back to prose so a bad
         value never crashes captioning.
+
+        `dataset_type="character"` (the default) returns the model's tuned
+        per-style templates **verbatim** — no behaviour change. `style`/`concept`
+        instead COMPOSE the instruction from a per-type framing clause + the same
+        format directive, so a Style/Concept dataset is captioned about its content/
+        context rather than its (trigger-learned) look. `sparse` is a Style-only
+        minimal-caption variant; it is ignored for the other types.
         """
+        if dataset_type in ("style", "concept"):
+            return self._compose_prompt(style, dataset_type, sparse)
         if style == "tags":
             return self.tags_template
         if style == "e621":
             return self.e621_template
         return self.prompt_template
+
+    def _compose_prompt(self, style: str, dataset_type: str, sparse: bool) -> str:
+        """Framing (per type) + format directive (per style), lightly per-model.
+
+        Kept free of extra stored templates: one framing string per type times one
+        format directive per style covers all combinations. JoyCaption keeps its
+        "refer to them as {subject}" convention (via `prompt_style`); an NSFW spec
+        (detected by its shared plainness clause) keeps a plainness directive.
+        """
+        fmt = style if style in _FORMAT_DIRECTIVE else "prose"
+        if dataset_type == "style":
+            framing = _STYLE_SPARSE_FRAMING if sparse else _STYLE_FRAMING
+        else:  # concept
+            framing = _CONCEPT_FRAMING
+        parts = [framing]
+        if self.prompt_style == "llava":  # JoyCaption's documented convention
+            parts.append("If a person or character is present, refer to them as "
+                         '"{subject}".')
+        parts.append(_FORMAT_DIRECTIVE[fmt])
+        if _NSFW_PLAINNESS in self.prompt_template:  # NSFW-specialist spec
+            parts.append(_PLAINNESS_DIRECTIVE[fmt].strip())
+        return " ".join(parts)
 
 
 CAPTIONERS: list[CaptionerSpec] = [

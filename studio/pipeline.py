@@ -57,6 +57,7 @@ def preprocess_sources(
     exclude_prompt: str = "",
     restore_backend: str = "",
     isolation_backend: str = "",
+    tighten_crop: bool = False,
     progress: ProgressFn = print,
 ) -> list[PreprocessReport]:
     reports: list[PreprocessReport] = []
@@ -65,7 +66,8 @@ def preprocess_sources(
         rep = preprocess(src, out_dir, target=target, force_restore=force_restore,
                          isolate=isolate, subject_prompt=subject_prompt,
                          exclude_prompt=exclude_prompt, restore_backend=restore_backend,
-                         isolation_backend=isolation_backend, progress=progress)
+                         isolation_backend=isolation_backend, tighten_crop=tighten_crop,
+                         progress=progress)
         extra = ", subject isolated" if rep.isolated else ""
         progress(
             f"  {src.name}: {rep.original_size[0]}x{rep.original_size[1]} -> "
