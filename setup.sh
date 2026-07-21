@@ -18,11 +18,13 @@ if [ ! -d .venv ]; then
 fi
 PIP=.venv/bin/pip
 
-# --- torch: CUDA if an NVIDIA GPU is present, else platform default (CPU / macOS MPS) ---
+# --- torch + ONNX Runtime: CUDA if an NVIDIA GPU is present, else platform default ---
 if command -v nvidia-smi >/dev/null 2>&1; then
+    WANT=gpu
     echo "NVIDIA GPU detected - installing CUDA build of PyTorch..."
     "$PIP" install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 else
+    WANT=cpu
     echo "No NVIDIA GPU detected - installing default PyTorch build."
     echo "NOTE: local captioning/isolation models are very slow without a GPU"
     echo "      (Apple Silicon uses MPS and is usable). Cloud captioners"
@@ -32,6 +34,16 @@ fi
 
 echo "Installing dependencies..."
 "$PIP" install -r requirements.txt
+
+# ONNX Runtime for the WD/e621 taggers (③), matched to the chosen build. Kept
+# out of requirements.txt so the CPU vs CUDA variant tracks the torch install.
+echo "Installing ONNX Runtime ($WANT) for the taggers..."
+"$PIP" uninstall -y onnxruntime onnxruntime-gpu >/dev/null 2>&1 || true
+if [ "$WANT" = gpu ]; then
+    "$PIP" install onnxruntime-gpu || echo "[warn] onnxruntime-gpu failed - taggers can fall back to CPU via 'pip install onnxruntime'."
+else
+    "$PIP" install onnxruntime || echo "[warn] onnxruntime failed - the taggers need it; install later with 'pip install onnxruntime'."
+fi
 
 # --- optional API keys -> .env ---
 echo

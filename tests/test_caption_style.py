@@ -10,7 +10,10 @@ from studio.captioner import (
     _normalize_tags,
     apply_affixes,
     caption_images,
+    drop_blacklisted_tags,
     finalize_caption,
+    merge_tagger_overrides,
+    parse_blacklist,
 )
 from studio.config import CAPTIONERS_BY_KEY
 
@@ -163,3 +166,56 @@ def test_caption_images_applies_prefix(tmp_path: Path, monkeypatch) -> None:
     items = caption_images([p], "gemini-flash", trigger="trig", style="tags",
                            prefix="score_9")
     assert items[0][1] == "score_9, trig, a, b"
+
+
+# ---------- tag drop-list (blacklist) ----------
+
+def test_parse_blacklist_normalizes_and_dedupes() -> None:
+    assert parse_blacklist("Simple_Background,  watermark ,\nsignature, watermark") == \
+        ["simple background", "watermark", "signature"]
+    assert parse_blacklist("") == []
+
+
+def test_drop_blacklisted_tags_removes_matches_keeps_trigger() -> None:
+    out = drop_blacklisted_tags("trig, simple background, standing, watermark",
+                                ["simple background", "watermark"], "tags")
+    assert out == "trig, standing"
+
+
+def test_drop_blacklisted_tags_matches_regardless_of_underscores_or_case() -> None:
+    out = drop_blacklisted_tags("trig, Long Hair, signature",
+                                parse_blacklist("long_hair, SIGNATURE"), "e621")
+    assert out == "trig"
+
+
+def test_drop_blacklisted_tags_noop_for_prose_or_empty() -> None:
+    assert drop_blacklisted_tags("trig, a person standing", ["standing"], "prose") == \
+        "trig, a person standing"
+    assert drop_blacklisted_tags("trig, standing", [], "tags") == "trig, standing"
+
+
+def test_drop_blacklisted_tags_keeps_trigger_even_if_listed() -> None:
+    # The first token is the identity trigger and is never dropped.
+    assert drop_blacklisted_tags("trig, standing", ["trig"], "tags") == "trig, standing"
+
+
+def test_caption_images_applies_blacklist_before_affixes(tmp_path: Path, monkeypatch) -> None:
+    p = tmp_path / "a.png"
+    p.write_bytes(b"x")
+    _stub_model(monkeypatch, "standing, watermark, blurry")
+    items = caption_images([p], "gemini-flash", trigger="trig", style="tags",
+                           prefix="score_9", blacklist="watermark, blurry")
+    # noisy tags gone; the fixed prefix survives the drop.
+    assert items[0][1] == "score_9, trig, standing"
+
+
+# ---------- tagger override merge ----------
+
+def test_merge_tagger_overrides_only_for_taggers() -> None:
+    # A non-tagger captioner is untouched.
+    assert merge_tagger_overrides("gemini-flash", None, include_rating=True) is None
+    # A tagger gets exactly the values that were set (None fields are skipped).
+    got = merge_tagger_overrides("wd-eva02", {"base_url": "x"},
+                                 general_threshold=0.2, include_rating=True)
+    assert got == {"base_url": "x", "general_threshold": 0.2, "include_rating": True}
+    assert "keep_underscores" not in got

@@ -74,6 +74,36 @@ def resolve_captioner_config(captioner_key: str, gemini_model: str = "") -> tupl
     return "", None
 
 
+def merge_tagger_overrides(
+    captioner_key: str,
+    spec_overrides: dict | None = None,
+    *,
+    general_threshold: float | None = None,
+    character_threshold: float | None = None,
+    include_rating: bool | None = None,
+    keep_underscores: bool | None = None,
+) -> dict | None:
+    """Fold the ③ Tag-options controls into spec_overrides — taggers only.
+
+    Shared by the UI and CLI so a tagger behaves identically in both. For any
+    non-tagger captioner the overrides are irrelevant, so `spec_overrides` is
+    returned untouched. Only the values the caller actually set (not None) are
+    merged, leaving the registry defaults for the rest.
+    """
+    if CAPTIONERS_BY_KEY[captioner_key].backend != "wd_tagger":
+        return spec_overrides
+    extra: dict = {}
+    if general_threshold is not None:
+        extra["general_threshold"] = float(general_threshold)
+    if character_threshold is not None:
+        extra["character_threshold"] = float(character_threshold)
+    if include_rating is not None:
+        extra["include_rating"] = bool(include_rating)
+    if keep_underscores is not None:
+        extra["keep_underscores"] = bool(keep_underscores)
+    return {**(spec_overrides or {}), **extra}
+
+
 def estimate_caption_cost(captioner_key: str, gemini_model: str, n_images: int) -> str:
     """Markdown cost line for captioning `n_images` with this captioner."""
     spec = CAPTIONERS_BY_KEY[captioner_key]
@@ -135,7 +165,9 @@ class Captioner:
 
             self._tagger = Tagger(self.spec.hf_id, self.spec.general_threshold,
                                   self.spec.character_threshold,
-                                  self.spec.tags_file, self.spec.tag_scheme)
+                                  self.spec.tags_file, self.spec.tag_scheme,
+                                  include_rating=self.spec.include_rating,
+                                  keep_underscores=self.spec.keep_underscores)
         self._tagger.load()
         return self._tagger
 
@@ -341,6 +373,39 @@ def apply_affixes(caption: str, prefix: str, suffix: str, style: str) -> str:
     return sep.join(p for p in (prefix, caption, suffix) if p)
 
 
+def parse_blacklist(text: str) -> list[str]:
+    """Normalize a user drop-list into comparable tag tokens.
+
+    Accepts a comma- or newline-separated list. Each entry is lowercased,
+    whitespace-collapsed and underscores→spaces, so it matches finalized tag
+    output (`long hair`) whether the user typed `long_hair` or `Long Hair`.
+    """
+    out: list[str] = []
+    for chunk in re.split(r"[,\n]", text or ""):
+        tag = re.sub(r"\s+", " ", chunk).strip().strip(".").lower().replace("_", " ")
+        if tag and tag not in out:
+            out.append(tag)
+    return out
+
+
+def drop_blacklisted_tags(caption: str, blacklist: list[str], style: str) -> str:
+    """Remove blacklisted tags from a comma-separated tag caption.
+
+    A no-op for prose (`style` not a tag style) or an empty list. The first tag
+    is the trigger and is always kept — the drop-list is for noisy descriptor
+    tags a tagger loves (`simple background`, `signature`, `watermark`), not the
+    identity token. Matching is on the normalized form, so casing/underscores
+    don't matter.
+    """
+    if style not in ("tags", "e621") or not blacklist:
+        return caption
+    drop = set(blacklist)
+    parts = [p.strip() for p in caption.split(",") if p.strip()]
+    kept = [p for i, p in enumerate(parts)
+            if i == 0 or p.lower().replace("_", " ") not in drop]
+    return ", ".join(kept)
+
+
 def _has_caption(image: Path) -> bool:
     """True if the image already has a non-empty .txt sidecar."""
     txt = image.with_suffix(".txt")
@@ -385,16 +450,19 @@ def caption_images(
     prefix: str = "",
     suffix: str = "",
     skip_existing: bool = False,
+    blacklist: str = "",
 ) -> list[tuple[Path, str]]:
     """Caption a list of images. Standalone — no run/pipeline state needed.
 
     `style` is "prose" (natural language), "tags" (Danbooru comma list) or
     "e621" (furry/anthro comma list). `prefix`/`suffix` wrap every caption (for
-    quality/score tags); `skip_existing` leaves images that already have a
+    quality/score tags); `blacklist` is a comma/newline drop-list of noisy tags
+    to strip (tag styles only); `skip_existing` leaves images that already have a
     non-empty .txt untouched. Returns (image_path, finalized_caption) pairs; the
     captioner model is loaded once and freed afterwards.
     """
     subject = character_name or "the character"
+    drop = parse_blacklist(blacklist)
     if skip_existing:
         kept = [p for p in images if not _has_caption(p)]
         if len(kept) != len(images):
@@ -432,6 +500,8 @@ def caption_images(
             raw = cap.caption(p, subject=subject, style=style)
             cap_text = finalize_caption(raw, trigger, character_name, SUBJECT_ALIASES,
                                         style=style)
+            # Drop noisy tags before affixes so a fixed prefix/suffix survives.
+            cap_text = drop_blacklisted_tags(cap_text, drop, style)
             items.append((p, apply_affixes(cap_text, prefix, suffix, style)))
     finally:
         cap.unload()
@@ -451,11 +521,13 @@ def caption_folder(
     prefix: str = "",
     suffix: str = "",
     skip_existing: bool = False,
+    blacklist: str = "",
 ) -> list[tuple[Path, str]]:
     """Caption images in `folder` (all, or the subset in `only`) and write
     .txt sidecars next to each image. The classic 'point at a folder and tag
     it' mode. `style` is "prose", "tags" (Danbooru) or "e621"; `prefix`/`suffix`
-    wrap every caption; `skip_existing` leaves already-captioned images alone."""
+    wrap every caption; `blacklist` drops noisy tags (tag styles only);
+    `skip_existing` leaves already-captioned images alone."""
     from studio.config import list_images
 
     images = only if only else list_images(folder)
@@ -464,7 +536,7 @@ def caption_folder(
     items = caption_images(images, captioner_key, character_name, trigger, progress,
                            model_override=model_override, spec_overrides=spec_overrides,
                            style=style, prefix=prefix, suffix=suffix,
-                           skip_existing=skip_existing)
+                           skip_existing=skip_existing, blacklist=blacklist)
     for img, caption in items:
         img.with_suffix(".txt").write_text(caption, encoding="utf-8")
     progress(f"Wrote {len(items)} .txt sidecar(s) in {folder}")

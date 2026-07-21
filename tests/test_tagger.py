@@ -10,6 +10,7 @@ from studio.tagger import (
     Tagger,
     _read_selected_tags,
     format_tag,
+    select_rating,
     select_tag_names,
 )
 
@@ -45,6 +46,29 @@ def test_select_tag_names_e621_species_is_general() -> None:
 def test_format_tag_underscores_to_spaces_but_keeps_kaomoji() -> None:
     assert format_tag("long_hair") == "long hair"
     assert format_tag("^_^") == "^_^"
+
+
+def test_format_tag_keep_underscores_leaves_raw_tokens() -> None:
+    assert format_tag("long_hair", keep_underscores=True) == "long_hair"
+    assert format_tag("^_^", keep_underscores=True) == "^_^"  # kaomoji unchanged
+
+
+# ---------- rating selection ----------
+
+def test_select_rating_picks_top_danbooru_rating() -> None:
+    labels = [
+        ("long_hair", 0, 0.9),
+        ("questionable", 9, 0.3),
+        ("explicit", 9, 0.7),   # highest rating -> chosen
+        ("general", 9, 0.1),
+    ]
+    assert select_rating(labels, "danbooru") == "explicit"
+
+
+def test_select_rating_empty_when_no_rating_category() -> None:
+    # e621/Z3D carries no rating category, so the opt-in is a no-op there.
+    labels = [("wolf", 5, 0.9), ("explicit", 9, 0.9)]
+    assert select_rating(labels, "e621") == ""
 
 
 def test_read_selected_tags_handles_both_csv_layouts(tmp_path: Path) -> None:
@@ -101,6 +125,16 @@ def test_tagger_tag_pipeline(monkeypatch) -> None:
     tg._categories = [0, 0, 4, 0]
     monkeypatch.setattr(tg, "_preprocess", lambda _p: None)
     assert tg.tag(Path("x.png")) == ["long hair", "smile", "hatsune miku"]
+
+
+def test_tagger_tag_pipeline_rating_and_underscores(monkeypatch) -> None:
+    tg = Tagger("fake/repo", include_rating=True, keep_underscores=True)
+    tg._session = _FakeSession([0.9, 0.95, 0.7])  # long_hair, character, explicit
+    tg._tag_names = ["long_hair", "hatsune_miku", "explicit"]
+    tg._categories = [0, 4, 9]  # 9 = rating
+    monkeypatch.setattr(tg, "_preprocess", lambda _p: None)
+    # underscores kept; the top rating appended after general+character tags.
+    assert tg.tag(Path("x.png")) == ["long_hair", "hatsune_miku", "explicit"]
 
 
 def test_captioner_wd_tagger_returns_joined_tags(monkeypatch) -> None:

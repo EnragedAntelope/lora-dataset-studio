@@ -41,6 +41,14 @@ def test_find_near_duplicate_groups(tmp_path: Path) -> None:
     assert set(groups[0]) == {a1, a2}
 
 
+def test_find_near_duplicate_groups_distance_is_configurable(tmp_path: Path) -> None:
+    a = _noise(tmp_path / "a.png", 1)
+    b = _noise(tmp_path / "b.png", 999)   # differs by > 5 bits (see test above)
+    # Strict distance keeps them apart; a very loose distance groups everything.
+    assert find_near_duplicate_groups([a, b], max_distance=0) == []
+    assert len(find_near_duplicate_groups([a, b], max_distance=64)) == 1
+
+
 # ---------- composition ----------
 
 def test_composition_flags_dark(tmp_path: Path) -> None:

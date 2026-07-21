@@ -1,6 +1,6 @@
 # Architecture
 
-Version: 0.8.0
+Version: 0.9.0
 
 ```
 app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)
@@ -15,11 +15,19 @@ studio/
                         image features — WD (Danbooru) and Z3D (e621) via one code
                         path, differing only in tag file + category SCHEMES. Pure
                         select/format logic is I/O-free (unit-tested); onnxruntime +
-                        hub download are lazy. The "wd_tagger" captioner backend
+                        hub download are lazy. The "wd_tagger" captioner backend.
+                        Opt-in extras: select_rating() appends the top rating tag
+                        (Danbooru cat 9), format_tag(keep_underscores=) keeps raw
+                        booru tokens
   dedupe.py             Advisory near-duplicate detection (perceptual dHash,
-                        numpy-only) surfaced in the ④ export preview
+                        numpy-only) surfaced in the ④ export preview; the Hamming
+                        distance (default 5) is a ④ slider
   quality.py            Advisory sharpness (blur) + exposure/contrast flags
                         (dark/bright/low-contrast) for the curate/export views
+  caption_lint.py       Advisory caption analysis (pure string logic): health lint
+                        (empty/short/trigger-missing/identical captions) + tag-
+                        frequency / near-ubiquitous-tag report for tag datasets.
+                        Surfaced after ③ and in the ④ preview; CLI `lint`
   hf_publish.py         Optional, opt-in publish of a dataset folder to the HF Hub
                         (private by default; write HF_TOKEN; huggingface_hub lazy)
   captioner.py          Captioner backends (transformers | gemini | openai-compat |
@@ -30,8 +38,11 @@ studio/
                         caption(style=) picks prose vs booru-tag template per spec;
                         finalize_caption(style=) normalizes tag output (dedupe,
                         lowercase, trigger-first). apply_affixes() wraps captions
-                        with fixed prefix/suffix (quality/score tags); skip_existing
-                        leaves already-captioned images alone
+                        with fixed prefix/suffix (quality/score tags);
+                        drop_blacklisted_tags() strips a noisy-tag drop-list;
+                        merge_tagger_overrides() folds the ③ tag-option controls into
+                        spec_overrides (shared by UI + CLI); skip_existing leaves
+                        already-captioned images alone
   package.py            Dataset export (NN.png/NN.txt + metadata.json + metadata.jsonl
                         + README.txt); zip_dataset() bundles a folder into a .zip;
                         resolve_export_items() classifies candidates by caption sidecar
@@ -218,6 +229,22 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
 - **Tagger thresholds flow through `spec_overrides`, not a new arg.** The ③ sliders set
   `general_threshold`/`character_threshold` via the same `CaptionerSpec.model_copy(update=…)`
   path the custom endpoint uses — no bespoke plumbing, and the registry spec stays pristine.
+  The rating and keep-underscores toggles ride the same seam (`include_rating`,
+  `keep_underscores`). `merge_tagger_overrides()` is the single place UI *and* CLI fold those
+  four controls in, and it is a no-op for any non-tagger captioner — so a stray threshold from
+  the UI can never leak into a Gemini/Groq spec.
+- **Rating tags are opt-in and Danbooru-only.** WD taggers expose a rating category (cat 9:
+  general/sensitive/questionable/explicit) that is otherwise dropped; `include_rating` appends
+  only the single highest-confidence one (ratings are mutually exclusive). The e621/Z3D scheme
+  carries **no** rating category — ratings aren't tags there — so `SCHEMES["e621"]["rating"]`
+  is empty and the toggle is a documented no-op for Z3D, not a wrong guess at a category id.
+- **The tag drop-list runs before affixes, never on prose, never on the trigger.**
+  `drop_blacklisted_tags` filters a comma tag list against a normalized blacklist (lowercase,
+  underscores→spaces, so `long_hair`/`Long Hair` both match `long hair`). It is applied after
+  `finalize_caption` but before `apply_affixes`, so a fixed prefix/suffix survives the drop; it
+  is a strict no-op for prose (`style` not a tag style) or an empty list; and the first token
+  (the identity trigger) is always kept even if the user lists it. `parse_blacklist` is the
+  shared normalizer (comma/newline tolerant).
 - **Caption prefix/suffix is a post-finalize wrap, applied once.** `apply_affixes` runs after
   `finalize_caption` (so the trigger is already placed) and joins with a comma for tag styles,
   a space for prose. It exists for constant tags the model shouldn't be asked to invent —
@@ -228,11 +255,21 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
   numpy-only, advisory, shown next to the blur flag in ②. It deliberately does **not** claim
   semantic framing (face/bust/body/back); that needs a detector and is left to the backlog.
   Like sharpness it never blocks — the curate gallery wraps it in try/except.
+- **Caption lint is advisory string logic, never a rewrite.** `caption_lint.py` mirrors the
+  blur/dedup pattern: it flags empty / too-short / trigger-missing / byte-identical captions and
+  (for tag datasets only) near-ubiquitous tags, but never edits or blocks. Two deliberate
+  choices keep it trustworthy: `min_words` defaults to 2 so only near-junk is called "short"
+  (a concise real caption is never nagged), and the tag-frequency report is gated on
+  `looks_like_tags()` (average ≤3 words per comma segment) so prose captions don't produce a
+  meaningless frequency list. In ④ it runs on captioned pairs only with an empty trigger —
+  empties are already summarized by the export note and the trigger is unknown at preview time,
+  so it adds only the short/duplicate/ubiquitous signals, no double-counting. All call sites
+  wrap it in try/except; an unreadable folder degrades to no report, never an error.
 - **Near-duplicate detection is advisory dHash, surfaced in ④.** `dedupe.find_near_duplicate_
-  groups` groups images within a small Hamming distance and the export preview lists them so
-  the user can uncheck over-weighted repeats. It never auto-drops. Note a dHash quirk: flat
-  images (solid colour) all hash alike, so a set of near-blank frames may group together —
-  acceptable for an advisory.
+  groups` groups images within a Hamming distance (default 5, exposed as a ④ slider so users can
+  loosen/tighten it) and the export preview lists them so the user can uncheck over-weighted
+  repeats. It never auto-drops. Note a dHash quirk: flat images (solid colour) all hash alike,
+  so a set of near-blank frames may group together — acceptable for an advisory.
 - **`metadata.jsonl` is written for every export.** `package_dataset` emits the HuggingFace
   `imagefolder` sidecar (`{"file_name","text"}` per image) alongside `metadata.json`, so the
   dataset also loads via `datasets.load_dataset("imagefolder", …)`. `.txt`-based trainers
@@ -323,7 +360,30 @@ dataset ──⑤ train  → writes ai-toolkit config.yaml OR musubi dataset.tom
 
 ## Roadmap / deferred
 
-Done this revision (0.8.0) — remaining backlog items 2–3 + all six 0.7.0 "further ideas":
+Done this revision (0.9.0) — four of the five "further ideas" logged in the 0.8.0 review
+(resolution normalization deferred), plus setup/requirements housekeeping:
+
+- ✅ **Global tag drop-list (③).** `drop_blacklisted_tags` strips noisy tags (`simple
+  background`, `signature`, `watermark`) from tag captions across a folder; UI *Tag options*
+  field + CLI/`build` `--drop-tags`. Trigger-safe, prose no-op, runs before affixes.
+- ✅ **Optional rating tags for taggers (③).** `include_rating` appends the top WD rating tag
+  (Danbooru cat 9); UI checkbox + CLI `--rating-tags`. Documented no-op for e621/Z3D.
+- ✅ **Keep-underscores toggle for taggers (③).** `format_tag(keep_underscores=)`; UI checkbox
+  + CLI `--keep-underscores`. Kaomoji still preserved.
+- ✅ **Configurable near-dup sensitivity (④).** The dHash Hamming distance is a ④ slider
+  (default 5) threaded into `find_near_duplicate_groups`.
+- ✅ **Caption health lint (③/④).** `caption_lint.lint_captions` flags empty / short / trigger-
+  missing / identical captions; shown after ③, in the ④ preview, and via CLI `lint`. Advisory.
+- ✅ **Tag-frequency / ubiquitous-tag report (③/④).** `caption_lint.tag_frequency` +
+  `ubiquitous_tags` surface tags on nearly every image (drop-list candidates), gated to tag
+  datasets. Pairs with the drop-list to tell the user *what* to drop.
+- ✅ **GPU/CPU setup choice + onnxruntime move.** `setup.bat` now offers an NVIDIA-GPU-optimized
+  vs CPU-only install and is re-runnable to switch an existing venv between them (torch +
+  onnxruntime). `onnxruntime` moved out of `requirements.txt` into the setup scripts so the CPU
+  (`onnxruntime`) or CUDA (`onnxruntime-gpu`) variant tracks the chosen build; `setup.sh` mirrors
+  this via nvidia-smi auto-detection.
+
+Done in 0.8.0 — remaining backlog items 2–3 + all six 0.7.0 "further ideas":
 
 - ✅ **e621 tagger (③)** — `toynya/Z3D-E621-Convnext` added through the generalized `Tagger`
   (scheme-driven categories); canonical furry/Pony tags. Shares the WD code path.
@@ -421,27 +481,51 @@ tagger thresholds, near-dup advisory, `metadata.jsonl`, kohya trainer, skip-alre
 
 ### Further ideas identified (0.8.0 review)
 
-New candidates that fit the project's shape, surfaced while building this round. Small,
-high-leverage; recorded so they aren't lost.
+Four of these five shipped in 0.9.0 (drop-list, rating tags, keep-underscores, near-dup
+sensitivity — see the top of this section). The one still open:
 
-- **Global tag blacklist / drop-list (③/④).** Let the user drop noisy tags a tagger loves
-  (`simple background`, `signature`, `watermark`) across a whole folder — complements the
-  prefix/suffix. Cheap; a small transform on the finalized tag list.
-- **Optional rating tags for taggers (③).** WD/Z3D expose safe/questionable/explicit ratings
-  we currently drop; some SDXL/Pony workflows want them. Add an opt-in that appends the top
-  rating — the selector already sees rating categories, so it's a small switch.
-- **Keep-underscores toggle for tags (③).** A few trainers ingest raw booru tags with
-  underscores; `format_tag` already centralizes the transform, so a toggle is trivial.
 - **Resolution normalization at export (④).** Optional pad-to-square / center-crop to a target
   size for trainers that want uniform square inputs — advisory today via buckets, but a real
-  transform would help SDXL-at-1024 users. Larger; design first.
-- **Configurable near-dup sensitivity (④).** Expose the dHash distance (fixed at 5) so users
-  can loosen/tighten the advisory. Trivial once someone asks.
+  transform would help SDXL-at-1024 users. Larger; design first. **Deliberately deferred** —
+  the bucket ladder covers most cases and a real transform mutates pixels, so it wants its own
+  design pass rather than being rushed into this release.
+
+### Further ideas identified (0.9.0 review)
+
+Surfaced while shipping this round. All fit the project shape (standalone/advisory, no new
+heavy deps, honest output). The top two — **caption health lint** and the **tag-frequency /
+ubiquitous-tag report** — shipped in 0.9.0 (see "Done this revision" above). Remaining,
+prioritized by benefit-to-cost:
+
+- **Caption-style ↔ trainer sanity check (④→⑤).** Record the caption style in export
+  `metadata.json` (the CLI `build` already records it; the UI export does not) and warn at ⑤
+  when prose captions feed a tag-trained preset (SDXL / Pony / Illustrious) or tags feed a
+  prose model (Flux / Krea). A cross-stage honesty check, no new deps.
+- **CLIP 77-token truncation warning for tag datasets (③/④).** SDXL / Illustrious silently
+  truncate captions past 77 tokens; a cheap comma/word-count heuristic can flag captions that
+  will be cut (optional lazy tokenizer for exactness). Advisory.
+- **Tighten-to-subject crop after isolation (①).** After the SAM3 cutout, optionally crop to
+  the subject's bounding box (numpy on the mask) so framing is consistent across shots and less
+  white padding is trained. Small, opt-in.
+- **Alpha (RGBA) cutout option (①).** Export the isolated subject on transparency instead of
+  white for workflows that composite their own backgrounds. Small toggle; white stays the
+  default (the Multiple-Angles LoRA is trained on white).
 
 **Explicitly not pursuing** (conflict with this project's scope): in-app training launch /
 cloud GPU rental, Test Studio / checkpoint ranking, Merge Lab, and web scraping. The
 first three are the "never launch training" line we hold deliberately (see Deferred); web
 scraping carries rights/ToS liability we don't want to put one click away.
+
+**GitHub About description / topics — revisit with the style-support release.** Proposed
+marketable copy is held until Concept/Style dataset types land (they change what the tool
+"does"), so the About blurb is refreshed once, accurately, alongside that feature rather than
+now. Draft to revisit then:
+- *Description:* "Turn one image of a character into a ready-to-train LoRA dataset — consistent
+  multi-angle shots, smart captions (prose/Danbooru/e621), and trainer-ready configs for Flux,
+  SDXL, Krea, Pony & more. Local or cloud, per stage. No training launched, no telemetry."
+- *Topics:* lora, lora-training, dataset-generation, stable-diffusion, flux, sdxl,
+  pony-diffusion, image-captioning, wd-tagger, sam3, comfyui, qwen-image, ai-toolkit, kohya,
+  gradio, huggingface, generative-ai.
 
 Deferred (with rationale):
 

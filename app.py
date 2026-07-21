@@ -26,8 +26,11 @@ from studio.captioner import (
     CaptionerConfigError,
     apply_affixes,
     caption_images,
+    drop_blacklisted_tags,
     estimate_caption_cost,
     finalize_caption,
+    merge_tagger_overrides,
+    parse_blacklist,
     resolve_captioner_config,
 )
 from studio.config import (
@@ -347,18 +350,18 @@ def save_custom_captioner(base_url: str, model: str, api_key_env: str,
             f"Select the 'Custom OpenAI-compatible endpoint' captioner to use it.")
 
 
-def _tagger_overrides(captioner_key: str, spec_overrides, gen_thr, char_thr):
-    """Merge the UI's tagger thresholds into spec_overrides (taggers only)."""
-    if CAPTIONERS_BY_KEY[captioner_key].backend != "wd_tagger":
-        return spec_overrides
-    return {**(spec_overrides or {}),
-            "general_threshold": float(gen_thr),
-            "character_threshold": float(char_thr)}
+def _tagger_overrides(captioner_key: str, spec_overrides, gen_thr, char_thr,
+                      rating: bool = False, underscores: bool = False):
+    """Merge the ③ Tag-options controls into spec_overrides (taggers only)."""
+    return merge_tagger_overrides(
+        captioner_key, spec_overrides, general_threshold=gen_thr,
+        character_threshold=char_thr, include_rating=rating, keep_underscores=underscores)
 
 
 def do_test_caption(folder: str, selected: list[str], captioner_key: str,
                     name: str, trigger: str, gemini_model: str, style: str,
-                    gen_thr: float, char_thr: float, prefix: str, suffix: str):
+                    gen_thr: float, char_thr: float, prefix: str, suffix: str,
+                    blacklist: str, rating: bool, underscores: bool):
     if not folder.strip() or not selected:
         raise gr.Error("Load a folder and select at least one image first.")
     path = Path(folder.strip()) / selected[0]
@@ -366,7 +369,8 @@ def do_test_caption(folder: str, selected: list[str], captioner_key: str,
     if CAPTIONERS_BY_KEY[captioner_key].backend == "wd_tagger":
         style = "tags"
     model_override, spec_overrides = _resolve_captioner_config(captioner_key, gemini_model)
-    spec_overrides = _tagger_overrides(captioner_key, spec_overrides, gen_thr, char_thr)
+    spec_overrides = _tagger_overrides(captioner_key, spec_overrides, gen_thr, char_thr,
+                                       rating, underscores)
     cap = Captioner(captioner_key, model_override=model_override, spec_overrides=spec_overrides)
     try:
         raw = cap.caption(path, subject=name or "the character", style=style)
@@ -375,6 +379,7 @@ def do_test_caption(folder: str, selected: list[str], captioner_key: str,
     finally:
         cap.unload()
     caption = finalize_caption(raw, trigger, name, SUBJECT_ALIASES, style=style)
+    caption = drop_blacklisted_tags(caption, parse_blacklist(blacklist), style)
     return apply_affixes(caption, prefix, suffix, style)
 
 
@@ -416,6 +421,7 @@ def _merge_export_folders(existing: str, new_folder: str) -> str:
 def do_caption(folder: str, selected: list[str], captioner_key: str,
                name: str, trigger: str, gemini_model: str, style: str,
                gen_thr: float, char_thr: float, prefix: str, suffix: str,
+               blacklist: str, rating: bool, underscores: bool,
                skip_existing: bool, exp_folders_prev: str, exp_name_prev: str,
                exp_trigger_prev: str, progress=gr.Progress()):
     if not folder.strip() or not selected:
@@ -423,7 +429,8 @@ def do_caption(folder: str, selected: list[str], captioner_key: str,
     base = Path(folder.strip())
     images = [base / s for s in selected]
     model_override, spec_overrides = _resolve_captioner_config(captioner_key, gemini_model)
-    spec_overrides = _tagger_overrides(captioner_key, spec_overrides, gen_thr, char_thr)
+    spec_overrides = _tagger_overrides(captioner_key, spec_overrides, gen_thr, char_thr,
+                                       rating, underscores)
     log: list[str] = []
 
     def report(msg: str):
@@ -434,7 +441,7 @@ def do_caption(folder: str, selected: list[str], captioner_key: str,
         items = caption_images(images, captioner_key, name, trigger, progress=report,
                                model_override=model_override, spec_overrides=spec_overrides,
                                style=style, prefix=prefix, suffix=suffix,
-                               skip_existing=skip_existing)
+                               skip_existing=skip_existing, blacklist=blacklist)
     except Exception as e:
         raise gr.Error(f"Captioning failed: {e}")
     for img, caption in items:
@@ -445,11 +452,31 @@ def do_caption(folder: str, selected: list[str], captioner_key: str,
     # in turn must accumulate), and carry name/trigger without clobbering values
     # the user already typed there.
     folders = _merge_export_folders(exp_folders_prev, str(base))
+    analysis = _caption_analysis(str(base), trigger)
     return (gallery, boxes, result, "\n".join(log), folders,
-            exp_name_prev or name, exp_trigger_prev or trigger)
+            exp_name_prev or name, exp_trigger_prev or trigger, analysis)
 
 
 # ---------- ④ export ----------
+
+def _caption_analysis(folder: str, trigger: str) -> str:
+    """Markdown health-lint + tag-frequency report for a captioned folder."""
+    from studio.caption_lint import analyze_folder, markdown_summary
+
+    if not folder.strip():
+        return ""
+    try:
+        report, ubiquitous = analyze_folder(Path(folder.strip()), trigger.strip())
+    except Exception:
+        return ""  # advisory — never break the caption flow
+    return markdown_summary(report, ubiquitous)
+
+
+def do_analyze_captions(folder: str, trigger: str) -> str:
+    if not folder.strip():
+        raise gr.Error("Load a folder first.")
+    return _caption_analysis(folder, trigger) or "No captions found to analyze yet."
+
 
 def _export_flag(img: Path) -> str:
     txt = img.with_suffix(".txt")
@@ -464,7 +491,7 @@ def _export_label(img: Path) -> tuple[str, str]:
     return f"{img.parent.name}/{img.name} — {_export_flag(img)}", str(img)
 
 
-def load_export_preview(folders_text: str):
+def load_export_preview(folders_text: str, dup_distance: float = 5):
     folders = [Path(line.strip()) for line in folders_text.splitlines() if line.strip()]
     if not folders:
         raise gr.Error("Enter at least one folder of captioned images (one per line).")
@@ -484,13 +511,28 @@ def load_export_preview(folders_text: str):
     try:  # advisory near-duplicate scan — never blocks the preview
         from studio.dedupe import find_near_duplicate_groups
 
-        groups = find_near_duplicate_groups(images)
+        groups = find_near_duplicate_groups(images, max_distance=int(dup_distance))
         if groups:
             shown = "; ".join("=".join(f"{p.parent.name}/{p.name}" for p in g)
                               for g in groups[:5])
             more = f" (+{len(groups) - 5} more)" if len(groups) > 5 else ""
             note += (f"\n\n🔁 **{len(groups)} near-duplicate group(s)** — consider "
                      f"unchecking extras so one shot isn't over-weighted: {shown}{more}")
+    except Exception:
+        pass
+    try:  # advisory caption health + tag frequency — never blocks the preview
+        from studio.caption_lint import analyze_pairs, markdown_summary
+
+        cap_pairs = []
+        for img in images:
+            txt = img.with_suffix(".txt")
+            if txt.exists() and (c := txt.read_text(encoding="utf-8").strip()):
+                cap_pairs.append((f"{img.parent.name}/{img.name}", c))
+        # trigger unknown at preview -> skip the missing-trigger check; empties are
+        # already summarized above, so only short/duplicate/ubiquitous add value.
+        report, ubiquitous = analyze_pairs(cap_pairs, trigger="")
+        if not report.clean or ubiquitous:
+            note += "\n\n" + markdown_summary(report, ubiquitous)
     except Exception:
         pass
     return gallery, gr.CheckboxGroup(choices=choices, value=values), note
@@ -802,22 +844,35 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                     pre_folder = gr.Textbox(label="…or input folder",
                                             placeholder="path/to/images (used if no upload)")
                     target = gr.Slider(512, 2048, value=settings.target_long_side, step=64,
-                                       label="Dataset resolution (long side, px)")
+                                       label="Dataset resolution (long side, px)",
+                                       info="1024 suits Flux/Krea/SDXL. Match your base model.")
                     restore_mode = gr.Radio(["Auto (only if needed)", "Always", "Never"],
-                                            value="Auto (only if needed)", label="Restoration")
+                                            value="Auto (only if needed)", label="Restoration",
+                                            info="Deblur/upscale degraded sources. Auto only "
+                                                 "acts when an image looks low-quality.")
                     restore_backend = gr.Dropdown(RESTORE_BACKEND_CHOICES,
                                                   value=settings.restore_backend,
-                                                  label="Restoration backend")
+                                                  label="Restoration backend",
+                                                  info="Auto uses ComfyUI models if reachable, "
+                                                       "else basic Lanczos resize.")
                     isolate = gr.Checkbox(value=True,
-                                          label="Isolate subject (cutout onto white background)")
+                                          label="Isolate subject (cutout onto white background)",
+                                          info="Cuts the subject out onto white so background "
+                                               "and props aren't baked into the LoRA.")
                     isolation_backend = gr.Dropdown(ISOLATION_CHOICES,
                                                     value=settings.isolation_backend,
-                                                    label="Isolation backend")
+                                                    label="Isolation backend",
+                                                    info="Built-in SAM3 needs no ComfyUI (gated "
+                                                         "HF model + HF_TOKEN).")
                     subject_prompt = gr.Textbox(label="Subject to keep (SAM3 prompt)",
-                                                value="character")
+                                                value="character",
+                                                info="What SAM3 keeps — e.g. 'character', "
+                                                     "'person', 'robot'.")
                     exclude_prompt = gr.Textbox(
                         label="Objects to remove (props the subject holds/touches)",
-                        placeholder="microphone, microphone stand")
+                        placeholder="microphone, microphone stand",
+                        info="Usually leave blank — SAM3 already excludes most props. Use only "
+                             "for a prop fused into the subject.")
                     btn_pre = gr.Button("① Preprocess", variant="primary")
                 with gr.Column(scale=2):
                     pre_note = gr.Markdown()
@@ -833,13 +888,19 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                                         file_types=["image"])
                     gen_src_folder = gr.Textbox(label="…or reference folder (auto-filled by ①)")
                     gen_name = gr.Textbox(label="Character name (used in prompts)",
-                                          placeholder="Sy Snootles")
+                                          placeholder="Sy Snootles",
+                                          info="Woven into each shot prompt. Leave blank for "
+                                               "a generic subject.")
                     refresh = gr.Button("Rebuild default plan with character name")
                     engine = gr.Radio(ENGINE_CHOICES, value=settings.default_engine,
-                                      label="Generation engine")
+                                      label="Generation engine",
+                                      info="Cloud Gemini needs no GPU (best identity, SFW); "
+                                           "local ComfyUI is free, private, uncensored.")
                     cloud_model = gr.Dropdown(CLOUD_MODEL_CHOICES,
                                               value=settings.gemini_image_model,
-                                              label="Cloud image model")
+                                              label="Cloud image model",
+                                              info="Only used by the Cloud engine. Prices are "
+                                                   "build-time estimates.")
                     refresh_models = gr.Button("🔄 Refresh model list from API")
                     force_refresh_models = gr.Button("🔄 Force refresh model list now")
                     cost = gr.Markdown()
@@ -851,11 +912,15 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                              "baked into every dataset image. Isolating the source in ① "
                              "is the more reliable fix.")
                     gen_isolate = gr.Checkbox(value=False,
-                                              label="Isolate generated angle shots (white background)")
+                                              label="Isolate generated angle shots (white background)",
+                                              info="Cut generated angle shots onto white too "
+                                                   "(helps the angles LoRA on back views).")
                     gen_iso_backend = gr.Dropdown(ISOLATION_CHOICES,
                                                   value=settings.isolation_backend,
-                                                  label="Isolation backend")
-                    gen_subject = gr.Textbox(label="Subject prompt for isolation", value="character")
+                                                  label="Isolation backend",
+                                                  info="Built-in SAM3 needs no ComfyUI.")
+                    gen_subject = gr.Textbox(label="Subject prompt for isolation", value="character",
+                                             info="What to keep when isolating generated shots.")
                     gen_exclude = gr.Textbox(
                         label="Objects to remove when isolating (auto-filled by ①)",
                         placeholder="backpack, walkie talkie",
@@ -899,19 +964,24 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
 
         with gr.Tab("③ Caption"):
             gr.Markdown("Tag any folder of images with caption `.txt` sidecars — the folder "
-                        "does **not** need to come from ① or ②. Pick **prose** or **booru "
-                        "tags** to match your target base model. Each captioner uses a prompt "
-                        "tuned to that model.")
+                        "does **not** need to come from ① or ②. Pick **prose**, **Danbooru "
+                        "tags** or **e621 tags** to match your target base model. Each "
+                        "captioner uses a prompt tuned to that model.")
             with gr.Row():
                 with gr.Column(scale=1):
                     cap_folder = gr.Textbox(label="Image folder (auto-filled by ①/②)")
                     btn_load = gr.Button("📂 Load folder")
                     cap_name = gr.Textbox(label="Character name (optional)",
-                                          placeholder="Sy Snootles")
+                                          placeholder="Sy Snootles",
+                                          info="Used in prose captions; taggers ignore it.")
                     cap_trigger = gr.Textbox(label="Trigger word (optional, placed first)",
-                                             placeholder="sysnootles")
+                                             placeholder="sysnootles",
+                                             info="Unique token the LoRA learns as the subject. "
+                                                  "Placed first in every caption.")
                     captioner = gr.Dropdown(CAPTIONER_CHOICES, value=settings.default_captioner,
-                                            label="Captioner")
+                                            label="Captioner",
+                                            info="Local VLMs need a GPU; taggers run on CPU too; "
+                                                 "Gemini/Groq are cloud. See the cost line below.")
                     cap_style = gr.Radio(
                         [("Prose — natural language (Flux, Qwen, SDXL 3, …)", "prose"),
                          ("Danbooru tags (SDXL, Illustrious, NoobAI, …)", "tags"),
@@ -925,27 +995,51 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                     with gr.Accordion("Tag options (taggers & tag styles)", open=False):
                         gr.Markdown(
                             "Fixed **prefix/suffix** ride on every caption — e.g. Pony's "
-                            "`score_9, score_8_up, score_7_up` quality tags. **Thresholds** "
-                            "tune how many tags the *taggers* emit (lower general = more "
-                            "tags).")
+                            "`score_9, score_8_up, score_7_up` quality tags. The **drop-list** "
+                            "strips noisy tags across the whole folder. **Thresholds** tune "
+                            "how many tags the *taggers* emit (lower general = more tags).")
                         cap_prefix = gr.Textbox(
                             label="Fixed prefix (added before the trigger)",
-                            placeholder="score_9, score_8_up, score_7_up")
-                        cap_suffix = gr.Textbox(label="Fixed suffix (added at the end)")
+                            placeholder="score_9, score_8_up, score_7_up",
+                            info="Constant tags added to every caption, before the trigger. "
+                                 "Tag styles only.")
+                        cap_suffix = gr.Textbox(
+                            label="Fixed suffix (added at the end)",
+                            info="Constant tags added at the end of every caption.")
+                        cap_blacklist = gr.Textbox(
+                            label="Drop-list (tags to remove)",
+                            placeholder="simple background, signature, watermark",
+                            info="Comma-separated tags stripped from every tag caption "
+                                 "(taggers & tag styles). Casing/underscores don't matter; "
+                                 "the trigger is always kept.")
+                        with gr.Row():
+                            cap_rating = gr.Checkbox(
+                                value=False, label="Append rating tag",
+                                info="Adds the tagger's top rating "
+                                     "(general/sensitive/questionable/explicit). "
+                                     "WD/Danbooru taggers only.")
+                            cap_underscores = gr.Checkbox(
+                                value=False, label="Keep underscores",
+                                info="Emit raw booru tags (long_hair) instead of "
+                                     "'long hair'. Taggers only.")
                         with gr.Row():
                             cap_gen_thr = gr.Slider(
                                 0.05, 0.95, value=0.35, step=0.05,
-                                label="Tagger: general threshold")
+                                label="Tagger: general threshold",
+                                info="Lower = more descriptor tags.")
                             cap_char_thr = gr.Slider(
                                 0.05, 0.95, value=0.85, step=0.05,
-                                label="Tagger: character threshold")
+                                label="Tagger: character threshold",
+                                info="Higher avoids mislabelling as a known character.")
                         cap_skip = gr.Checkbox(
                             value=False,
-                            label="Skip images that already have a caption")
+                            label="Skip images that already have a caption",
+                            info="Leave existing .txt sidecars untouched — caption only the rest.")
                     cap_cost = gr.Markdown()
                     cap_gemini_model = gr.Dropdown(
                         CAPTION_MODEL_CHOICES, value=_DEFAULT_CAPTION_MODEL,
-                        label="Gemini caption model (only used by the Gemini captioner)")
+                        label="Gemini caption model (only used by the Gemini captioner)",
+                        info="Ignored unless the Gemini captioner is selected.")
                     btn_refresh_cap_models = gr.Button("🔄 Refresh Gemini model list from API")
                     _custom_cfg = _uc_boot.get_custom_captioner()
                     with gr.Accordion("Custom endpoint settings (for the 'Custom …' captioner)",
@@ -986,6 +1080,13 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                 btn_edit_save = gr.Button("💾 Save caption", variant="primary", scale=1)
             cap_edit_text = gr.Textbox(label="Caption editor", lines=4)
             cap_result = gr.Markdown()
+            btn_lint = gr.Button("🔎 Analyze captions (health & tag frequency)")
+            gr.Markdown(
+                "Advisory only — flags empty / too-short / trigger-missing captions, "
+                "identical captions (a captioner that returned junk), and, for tag "
+                "datasets, tags that appear on nearly every image (drop-list candidates). "
+                "Runs automatically after captioning; click to re-check any loaded folder.")
+            cap_analysis = gr.Markdown()
 
         with gr.Tab("④ Export"):
             gr.Markdown("Package captioned images into a flat `NN.png` + `NN.txt` dataset "
@@ -994,16 +1095,24 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
                         "preprocessed sources **and** the generated shots — then **Load & "
                         "preview** to make your final pick before exporting.")
             exp_folders = gr.Textbox(label="Folders of captioned images (one per line)", lines=3)
-            btn_load_preview = gr.Button("📂 Load & preview")
+            with gr.Row():
+                btn_load_preview = gr.Button("📂 Load & preview", scale=2)
+                exp_dup_dist = gr.Slider(
+                    1, 12, value=5, step=1, scale=1,
+                    label="Near-duplicate sensitivity",
+                    info="Higher flags more images as near-duplicates (dHash bit distance).")
             exp_preview_note = gr.Markdown()
             exp_gallery = gr.Gallery(label="Final review — click a thumbnail to zoom",
                                      columns=6, height=420, allow_preview=True)
             exp_select = gr.CheckboxGroup(
                 label="✅ Images to export — UNCHECK to drop", choices=[])
             with gr.Row():
-                exp_name = gr.Textbox(label="Character name", placeholder="Sy Snootles")
-                exp_trigger = gr.Textbox(label="Trigger word", placeholder="sysnootles")
-            output_root = gr.Textbox(label="Output folder", value=str(settings.output_root))
+                exp_name = gr.Textbox(label="Character name", placeholder="Sy Snootles",
+                                      info="Names the dataset folder and metadata.")
+                exp_trigger = gr.Textbox(label="Trigger word", placeholder="sysnootles",
+                                         info="Recorded in the dataset metadata/README.")
+            output_root = gr.Textbox(label="Output folder", value=str(settings.output_root),
+                                     info="Where the NN.png/NN.txt dataset folder is written.")
             exp_zip = gr.Checkbox(
                 value=False, label="Also save a .zip of the dataset",
                 info="A single archive next to the folder — handy for uploading to a cloud trainer.")
@@ -1038,30 +1147,42 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
             _ai_presets = TRAINER_MODELS["ai-toolkit"]
             with gr.Row():
                 with gr.Column(scale=1):
-                    tr_trainer = gr.Radio(TRAINER_CHOICES, value="ai-toolkit", label="Trainer")
+                    tr_trainer = gr.Radio(TRAINER_CHOICES, value="ai-toolkit", label="Trainer",
+                                          info="ai-toolkit is one-command; musubi/kohya emit a "
+                                               "config plus a run-command template.")
                     tr_path = gr.Textbox(label="Trainer install path (saved on this machine)",
                                          value=_uc.get_trainer_path("ai-toolkit"),
-                                         placeholder=r"C:\ai-toolkit")
+                                         placeholder=r"C:\ai-toolkit",
+                                         info="Only used to compose the displayed run command.")
                     tr_save_path = gr.Button("💾 Save install path")
                     tr_path_note = gr.Markdown()
                     tr_model = gr.Dropdown([(p.label, p.key) for p in _ai_presets],
-                                           value=_ai_presets[0].key, label="Model")
-                    tr_name = gr.Textbox(label="LoRA name", placeholder="sysnootles-lora")
+                                           value=_ai_presets[0].key, label="Model",
+                                           info="Pick your target base model. <<FILL>> presets "
+                                                "need you to supply a model path.")
+                    tr_name = gr.Textbox(label="LoRA name", placeholder="sysnootles-lora",
+                                         info="Output name for the trained LoRA file.")
                     tr_trigger = gr.Textbox(label="Trigger word (used in the sample prompt)",
-                                            placeholder="sysnootles")
+                                            placeholder="sysnootles",
+                                            info="Should match the trigger you captioned with.")
                     with gr.Row():
                         tr_res = gr.Number(value=_ai_presets[0].resolution, precision=0,
-                                           label="Resolution")
+                                           label="Resolution",
+                                           info="Train resolution; match your dataset.")
                         tr_batch = gr.Number(value=_ai_presets[0].batch_size, precision=0,
-                                             label="Batch size")
+                                             label="Batch size",
+                                             info="Raise only if VRAM allows.")
                     with gr.Row():
-                        tr_rank = gr.Number(value=_ai_presets[0].rank, precision=0, label="Rank")
+                        tr_rank = gr.Number(value=_ai_presets[0].rank, precision=0, label="Rank",
+                                            info="LoRA capacity. 16 is a safe default.")
                         tr_alpha = gr.Number(value=_ai_presets[0].alpha, precision=0,
-                                             label="Alpha")
+                                             label="Alpha", info="Usually equal to rank.")
                     with gr.Row():
                         tr_steps = gr.Number(value=_ai_presets[0].steps, precision=0,
-                                             label="Steps")
-                        tr_lr = gr.Number(value=_ai_presets[0].lr, label="Learning rate")
+                                             label="Steps",
+                                             info="Auto-suggested from image count on Inspect.")
+                        tr_lr = gr.Number(value=_ai_presets[0].lr, label="Learning rate",
+                                          info="1e-4 is a common starting point.")
                     tr_multi_res = gr.Checkbox(
                         value=True, label="Multi-resolution buckets",
                         info="Bucket by the dataset's real aspect ratios instead of "
@@ -1139,17 +1260,21 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
         [cap_custom_note])
     btn_test.click(do_test_caption,
                    [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model,
-                    cap_style, cap_gen_thr, cap_char_thr, cap_prefix, cap_suffix],
+                    cap_style, cap_gen_thr, cap_char_thr, cap_prefix, cap_suffix,
+                    cap_blacklist, cap_rating, cap_underscores],
                    [test_caption])
     btn_caption.click(
         do_caption,
         [cap_folder, cap_select, captioner, cap_name, cap_trigger, cap_gemini_model, cap_style,
-         cap_gen_thr, cap_char_thr, cap_prefix, cap_suffix, cap_skip,
+         cap_gen_thr, cap_char_thr, cap_prefix, cap_suffix,
+         cap_blacklist, cap_rating, cap_underscores, cap_skip,
          exp_folders, exp_name, exp_trigger],
-        [cap_gallery, cap_select, cap_result, log_box, exp_folders, exp_name, exp_trigger]) \
+        [cap_gallery, cap_select, cap_result, log_box, exp_folders, exp_name, exp_trigger,
+         cap_analysis]) \
                .then(_editor_choices, [cap_folder], [cap_edit_file])
+    btn_lint.click(do_analyze_captions, [cap_folder, cap_trigger], [cap_analysis])
 
-    btn_load_preview.click(load_export_preview, [exp_folders],
+    btn_load_preview.click(load_export_preview, [exp_folders, exp_dup_dist],
                            [exp_gallery, exp_select, exp_preview_note])
     btn_export.click(do_export, [exp_select, exp_name, exp_trigger, output_root, exp_zip],
                      [exp_result, tr_dataset, exp_ds_dir]) \

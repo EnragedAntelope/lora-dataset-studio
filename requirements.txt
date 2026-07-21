@@ -17,10 +17,11 @@ pandas>=2.0
 pyyaml>=6.0
 huggingface-hub>=0.24   # HF dataset publishing (④) + tagger/model downloads
 
-# Optional: only the WD tagger captioner (③) needs onnxruntime. This is the CPU
-# build; on CUDA you can swap it for onnxruntime-gpu. It is lazy-imported, so the
-# app runs fine without it until you pick a tagger.
-onnxruntime>=1.17
+# NOTE: onnxruntime (the WD/e621 tagger backend, ③) is installed by
+# setup.bat / setup.sh, NOT here — the CPU build (`onnxruntime`) or the CUDA
+# build (`onnxruntime-gpu`) is chosen to match your PyTorch install. It is
+# lazy-imported, so the app runs fine without it until you pick a tagger. To
+# add it by hand: `pip install onnxruntime` (CPU) or `onnxruntime-gpu` (CUDA).
 
 # dev/test
 pytest>=8.0

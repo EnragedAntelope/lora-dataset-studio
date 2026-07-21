@@ -142,6 +142,15 @@ def caption(
     prefix: str = typer.Option(
         "", help="Fixed text added before every caption (e.g. Pony 'score_9, score_8_up')"),
     suffix: str = typer.Option("", help="Fixed text added after every caption"),
+    drop_tags: str = typer.Option(
+        "", "--drop-tags",
+        help="Comma-separated tags to strip from tag captions (e.g. 'watermark, signature')"),
+    rating_tags: bool = typer.Option(
+        False, "--rating-tags/--no-rating-tags",
+        help="Append the tagger's top rating tag (WD/Danbooru taggers only)"),
+    keep_underscores: bool = typer.Option(
+        False, "--keep-underscores",
+        help="Keep raw booru underscores in tagger output (long_hair, not 'long hair')"),
     skip_captioned: bool = typer.Option(
         False, "--skip-captioned",
         help="Leave images that already have a non-empty .txt caption untouched"),
@@ -154,6 +163,7 @@ def caption(
     from studio.captioner import (
         CaptionerConfigError,
         caption_folder,
+        merge_tagger_overrides,
         resolve_captioner_config,
     )
 
@@ -163,9 +173,32 @@ def caption(
     except CaptionerConfigError as e:
         typer.echo(str(e))
         raise typer.Exit(1)
+    spec_overrides = merge_tagger_overrides(
+        captioner, spec_overrides, include_rating=rating_tags,
+        keep_underscores=keep_underscores)
     caption_folder(folder, captioner, name, trigger, progress=typer.echo,
                    model_override=model_override, spec_overrides=spec_overrides, style=style,
-                   prefix=prefix, suffix=suffix, skip_existing=skip_captioned)
+                   prefix=prefix, suffix=suffix, skip_existing=skip_captioned,
+                   blacklist=drop_tags)
+
+
+@app.command()
+def lint(
+    folder: Path = typer.Argument(..., exists=True, file_okay=False,
+                                  help="Folder of captioned images to analyze"),
+    trigger: str = typer.Option("", help="Trigger expected first in every caption"),
+):
+    """Advisory caption health + tag-frequency report for a folder (standalone).
+
+    Flags empty / short / trigger-missing / identical captions and, for tag
+    datasets, tags present on nearly every image. Never modifies anything.
+    """
+    from studio.caption_lint import analyze_folder, markdown_summary
+
+    report, ubiquitous = analyze_folder(folder, trigger)
+    # Strip Markdown emphasis for a clean terminal read.
+    text = markdown_summary(report, ubiquitous).replace("**", "").replace("`", "")
+    typer.echo(text)
 
 
 @app.command()
@@ -244,6 +277,9 @@ def build(
     prefix: str = typer.Option(
         "", help="Fixed text added before every caption (e.g. Pony 'score_9, score_8_up')"),
     suffix: str = typer.Option("", help="Fixed text added after every caption"),
+    drop_tags: str = typer.Option(
+        "", "--drop-tags",
+        help="Comma-separated tags to strip from tag captions (e.g. 'watermark, signature')"),
 ):
     """Full pipeline: preprocess -> generate -> caption -> export."""
     from studio.captioner import caption_images
@@ -276,7 +312,7 @@ def build(
 
     all_images = [r.output for r in reports] + kept
     items = caption_images(all_images, captioner, name, trigger, progress=typer.echo,
-                           style=style, prefix=prefix, suffix=suffix)
+                           style=style, prefix=prefix, suffix=suffix, blacklist=drop_tags)
     metadata = {
         "character_name": name,
         "trigger": trigger,

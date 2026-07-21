@@ -26,15 +26,21 @@ from pathlib import Path
 
 # Category-id sets per tagging scheme. A tagger's tag CSV stores a numeric
 # category per tag; the meaning differs between Danbooru and e621. Tags whose
-# category is in neither set (Danbooru ratings; e621 meta/invalid) are dropped.
+# category is in none of the sets below are dropped. The "rating" set feeds the
+# optional rating tag (opt-in) — everything in it is otherwise dropped.
 SCHEMES = {
-    # Danbooru (WD taggers): 0=general, 4=character, 9=rating.
-    "danbooru": {"general": frozenset({0}), "character": frozenset({4})},
+    # Danbooru (WD taggers): 0=general, 4=character, 9=rating
+    # (general/sensitive/questionable/explicit).
+    "danbooru": {"general": frozenset({0}), "character": frozenset({4}),
+                 "rating": frozenset({9})},
     # e621 (Z3D): 0=general, 1=artist, 3=copyright, 4=character, 5=species,
     # 7=meta, 8=lore. Species reads like a general descriptor for training, so it
     # rides the general threshold; artist/copyright/character/lore are specific
     # labels held to the higher character threshold; meta/invalid are dropped.
-    "e621": {"general": frozenset({0, 5}), "character": frozenset({1, 3, 4, 8})},
+    # Z3D's vocabulary carries no rating category (ratings are not tags), so the
+    # optional rating tag is a documented no-op for it.
+    "e621": {"general": frozenset({0, 5}), "character": frozenset({1, 3, 4, 8}),
+             "rating": frozenset()},
 }
 
 # Tags that are literally kaomoji — underscores are part of the face, so they
@@ -45,9 +51,17 @@ _KAOMOJI = {
 }
 
 
-def format_tag(name: str) -> str:
-    """Raw booru tag -> caption form: underscores become spaces (kaomoji kept)."""
-    return name if name in _KAOMOJI else name.replace("_", " ")
+def format_tag(name: str, keep_underscores: bool = False) -> str:
+    """Raw booru tag -> caption form.
+
+    Underscores become spaces (the usual trainer convention); kaomoji are always
+    kept verbatim (their underscores are part of the face). `keep_underscores`
+    leaves ordinary tags as raw booru tokens (`long_hair`) for the few trainers
+    that ingest them unmodified.
+    """
+    if name in _KAOMOJI or keep_underscores:
+        return name
+    return name.replace("_", " ")
 
 
 def select_tag_names(
@@ -77,6 +91,22 @@ def select_tag_names(
     general.sort(key=lambda x: x[1], reverse=True)
     character.sort(key=lambda x: x[1], reverse=True)
     return [n for n, _ in general] + [n for n, _ in character]
+
+
+def select_rating(labels: list[tuple[str, int, float]], scheme: str = "danbooru") -> str:
+    """Return the single highest-confidence rating tag name, or "" if none.
+
+    Ratings (Danbooru category 9: general/sensitive/questionable/explicit) are
+    mutually exclusive, so only the top one is meaningful. Schemes without a
+    rating category (e621/Z3D) return "" — the opt-in is a no-op there. Pure
+    function, no I/O: part of the unit-tested seam.
+    """
+    rating_cats = SCHEMES.get(scheme, SCHEMES["danbooru"]).get("rating", frozenset())
+    best: tuple[str, float] | None = None
+    for name, category, prob in labels:
+        if category in rating_cats and (best is None or prob > best[1]):
+            best = (name, prob)
+    return best[0] if best else ""
 
 
 def _read_selected_tags(csv_path: Path) -> tuple[list[str], list[int]]:
@@ -110,12 +140,16 @@ class Tagger:
 
     def __init__(self, hf_id: str, general_threshold: float = 0.35,
                  character_threshold: float = 0.85,
-                 tags_file: str = "selected_tags.csv", scheme: str = "danbooru") -> None:
+                 tags_file: str = "selected_tags.csv", scheme: str = "danbooru",
+                 include_rating: bool = False, keep_underscores: bool = False) -> None:
         self.hf_id = hf_id
         self.general_threshold = general_threshold
         self.character_threshold = character_threshold
         self.tags_file = tags_file
         self.scheme = scheme
+        # Opt-in: append the top rating tag (Danbooru only) / keep raw underscores.
+        self.include_rating = include_rating
+        self.keep_underscores = keep_underscores
         self._session = None
         self._tag_names: list[str] = []
         self._categories: list[int] = []
@@ -172,7 +206,11 @@ class Tagger:
                   for i in range(len(self._tag_names))]
         names = select_tag_names(labels, self.general_threshold,
                                  self.character_threshold, self.scheme)
-        return [format_tag(n) for n in names]
+        if self.include_rating:
+            rating = select_rating(labels, self.scheme)
+            if rating:
+                names.append(rating)
+        return [format_tag(n, self.keep_underscores) for n in names]
 
     def unload(self) -> None:
         self._session = None

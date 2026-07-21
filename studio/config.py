@@ -147,6 +147,10 @@ class CaptionerSpec(BaseModel):
     character_threshold: float = 0.85
     tags_file: str = "selected_tags.csv"
     tag_scheme: str = "danbooru"
+    # Opt-in tagger extras (set at runtime from the ③ Tag options): append the
+    # top rating tag (Danbooru only), and keep raw booru underscores.
+    include_rating: bool = False
+    keep_underscores: bool = False
     vram_note: str = ""
     nsfw_capable: bool = True
     cost_note: str = "free"
