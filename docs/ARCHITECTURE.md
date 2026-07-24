@@ -1,6 +1,6 @@
 # Architecture
 
-Version: 0.10.1
+Version: 0.10.2
 
 ```
 app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)
@@ -83,6 +83,17 @@ studio/
     comfyui.py          Local engine (Qwen Image Edit 2511 + Multiple-Angles LoRA)
   comfy_workflows/*.json  API-format ComfyUI graphs (restore, isolate ×2, qwen edit)
 ```
+
+## Testing & CI
+
+`pytest` (config in `pytest.ini`) covers the pure logic — the tagger `select_*`/`format_*` seams,
+caption finalization/lint, trainer-config rendering, package/zip resolution, shot planning, etc. —
+without downloading a model or touching the network (heavy backends are lazy-imported and mocked).
+Run the suite with `pytest -q`; lint with `ruff check .` (rules in `pyproject.toml`).
+
+`.github/workflows/ci.yml` runs both on every push to `main` and every PR, across Python
+3.10–3.12. It installs `requirements.txt` only (**no `torch`**): the suite is CPU-only and never
+needs the real ML backends, so CI stays fast and deterministic.
 
 ## Design rules
 
@@ -511,9 +522,17 @@ Style/Concept release):
 ## Security posture
 
 - UI binds to `127.0.0.1`; no auth layer, so it must not be exposed (`share=True` is deliberately
-  not used). `allowed_paths` is widened to drive roots so galleries can display images in arbitrary
-  user output folders — acceptable only given the localhost bind. Do not expose the app; do not add
-  `share=True`.
+  not used). `_allowed_media_paths()` widens Gradio's `allowed_paths` to the drive roots (`/` on
+  POSIX, each present drive on Windows) so galleries can preview images in **any** user-entered
+  input/output folder — the app is designed to point any tab at any folder, and `allowed_paths` is
+  fixed at launch, so it cannot be narrowed per-request as the user types new paths. The tradeoff,
+  stated plainly: **while the app runs, the localhost file endpoint can serve any file the process
+  can read** (`http://127.0.0.1:7861/file=…`). That is acceptable *only* because the bind is
+  localhost-with-no-auth — the same trust boundary the whole app already assumes. Mitigation is
+  operational, not code: keep the bind on `127.0.0.1`, never add `share=True`, and don't forward or
+  expose the port. (Considered and rejected: narrowing to the configured roots or to `$HOME` — both
+  break the standalone "preview images from any folder" workflow for datasets stored elsewhere, for
+  a read surface that the localhost boundary already contains.)
 - **Costs and content are the user's responsibility**, stated in-app (header banner + "Costs & your
   responsibility" accordion) and in the README. Cloud calls bill the user's own key; custom
   endpoints bill whatever provider the user points at. No charges flow through this project.

@@ -1381,8 +1381,11 @@ with gr.Blocks(title="LoRA Dataset Studio") as demo:
 if __name__ == "__main__":
     # Bound to localhost on purpose: no auth layer, and .env keys are reachable
     # through the process. Do not expose publicly / use share=True.
-    # allowed_paths lets the galleries display images written to user-chosen
-    # output folders on any drive (Gradio otherwise refuses paths outside the
-    # CWD/temp dir). Safe only because of the localhost-only bind above.
+    # allowed_paths lets the galleries display images in user-chosen input/output
+    # folders on any drive (Gradio otherwise refuses paths outside the CWD/temp
+    # dir). It is fixed at launch, so it can't be narrowed per-request; the
+    # consequence is that the local file endpoint can serve any file the process
+    # can read. Safe ONLY because of the localhost-only, no-auth bind above — see
+    # the Security posture note in docs/ARCHITECTURE.md.
     demo.launch(server_name="127.0.0.1", server_port=7861, inbrowser=True,
                 allowed_paths=_allowed_media_paths())

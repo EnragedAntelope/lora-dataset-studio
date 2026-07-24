@@ -3,8 +3,9 @@
 **Turn a character, style, or concept into a ready-to-train LoRA dataset.** For a **character**,
 one reference image becomes ~24 consistent shots across camera angles, poses, emotions and
 settings. For a **style** or **concept**, bring your own images and get smart, correctly-framed
-captions. Either way the output is a flat folder that drops straight into **ai-toolkit / kohya /
-OneTrainer**, plus a ready-to-edit **training config**.
+captions. Either way the output is a flat folder that drops straight into any trainer
+(**ai-toolkit / kohya / OneTrainer / …**), plus a ready-to-edit **training config** for
+ai-toolkit, kohya or musubi.
 
 ![Generate & curate tab](docs/images/ui-generate.png)
 
@@ -164,7 +165,10 @@ python cli.py build source.png --name "Sy Snootles" --trigger sysnootles  # all 
   generation, built-in SAM3, local captioning and export all work without it. **No custom nodes
   required.** See [docs/comfyui-setup.md](docs/comfyui-setup.md).
 - **Sources are never modified**; every stage writes copies.
-- The UI binds to `127.0.0.1` with **no authentication** — don't expose it.
+- The UI binds to `127.0.0.1` with **no authentication** — don't expose it. So galleries can
+  preview images from any folder you point a tab at, the local file server can read any file the
+  app process can while it's running; that's safe only behind the localhost bind, so never forward
+  the port or add `share=True`.
 - Training configs are generated, never test-trained. Verify against your trainer's docs.
 - **Update check:** one anonymous request to GitHub's public releases API on launch (cached
   24h); no data about you is sent. Disable with `LDS_UPDATE_CHECK_ENABLED=false`.

@@ -27,3 +27,4 @@ huggingface-hub>=0.24   # HF dataset publishing (④) + tagger/model downloads
 # dev/test
 pytest>=8.0
 pytest-mock>=3.14
+ruff>=0.6            # lint (config in pyproject.toml); run in CI

@@ -75,6 +75,15 @@ def test_aitoolkit_yaml_escapes_windows_path_and_quotes(tmp_path: Path) -> None:
     assert "trg, x" in proc["sample"]["prompts"][0]
 
 
+def test_aitoolkit_sample_dims_follow_resolution(tmp_path: Path) -> None:
+    """Sample width/height track the training resolution instead of a hardcoded 1024."""
+    cfg = _cfg("ai-toolkit", tmp_path)
+    cfg.resolution = 768
+    sample = yaml.safe_load(render_aitoolkit_yaml(cfg))["config"]["process"][0]["sample"]
+    assert sample["width"] == 768
+    assert sample["height"] == 768
+
+
 def test_unknown_trainer_raises(tmp_path: Path) -> None:
     cfg = _cfg("ai-toolkit", tmp_path)
     cfg.trainer = "nope"
