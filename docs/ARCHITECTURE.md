@@ -1,6 +1,6 @@
 # Architecture
 
-Version: 0.10.2
+Version: 0.10.3
 
 ```
 app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)

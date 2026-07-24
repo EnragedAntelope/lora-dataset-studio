@@ -28,3 +28,4 @@ huggingface-hub>=0.24   # HF dataset publishing (④) + tagger/model downloads
 pytest>=8.0
 pytest-mock>=3.14
 ruff>=0.6            # lint (config in pyproject.toml); run in CI
+tomli>=2.0 ; python_version < "3.11"   # tests parse emitted TOML; tomllib is 3.11+ stdlib
