@@ -107,7 +107,15 @@ def preprocess(
     if force_restore:
         reason = reason or "forced by user"
 
+    # Never clobber a same-named output. `list_images` admits several extensions,
+    # so two sources sharing a stem (e.g. cat.jpg + cat.png, in one folder or
+    # across merged inputs) would otherwise both map to `cat_prepped.png` and the
+    # second would silently overwrite the first — quietly dropping an image.
     out_path = work_dir / f"{source.stem}_prepped.png"
+    n = 2
+    while out_path.exists():
+        out_path = work_dir / f"{source.stem}_prepped_{n}.png"
+        n += 1
     stage_path = source
     if restore:
         if restore_backend == "auto":

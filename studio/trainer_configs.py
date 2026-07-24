@@ -20,7 +20,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
 from pydantic import BaseModel
+
+
+def _yaml_str(value: str) -> str:
+    """Render `value` as a safe single-line YAML scalar for interpolation.
+
+    User-supplied strings reach the ai-toolkit config — a LoRA `name`, a model
+    `name_or_path` (which may be a Windows checkpoint path like
+    ``C:\\models\\x.safetensors``), and the sample prompt (which embeds the
+    trigger/name). Dropping such text into a hand-written double-quoted YAML
+    scalar breaks the file: a backslash is an escape char there and a stray ``"``
+    ends the string early. Emitting through PyYAML picks correct quoting instead.
+    Whitespace is collapsed first (a name/path is single-line by nature) so the
+    result is always one physical line safe to splice into the template.
+    """
+    flat = " ".join(str(value).split())
+    return yaml.safe_dump(flat, default_flow_style=True, allow_unicode=True).splitlines()[0].strip()
 
 TRAINERS = {
     "ai-toolkit": "ostris ai-toolkit (one-command: python run.py config.yaml)",
@@ -188,7 +205,7 @@ def render_aitoolkit_yaml(cfg: TrainConfig) -> str:
         "---\n"
         "job: extension\n"
         "config:\n"
-        f"  name: \"{cfg.name}\"\n"
+        f"  name: {_yaml_str(cfg.name)}\n"
         "  process:\n"
         "    - type: sd_trainer\n"
         f"      training_folder: \"output\"\n"
@@ -220,7 +237,7 @@ def render_aitoolkit_yaml(cfg: TrainConfig) -> str:
         f"        lr: {cfg.lr}\n"
         "        dtype: bf16\n"
         "      model:\n"
-        f"        name_or_path: \"{m.name_or_path}\"\n"
+        f"        name_or_path: {_yaml_str(m.name_or_path)}\n"
         f"{arch_line}"
         f"        quantize: {str(m.quantize).lower()}\n"
         "      sample:\n"
@@ -228,7 +245,7 @@ def render_aitoolkit_yaml(cfg: TrainConfig) -> str:
         "        width: 1024\n"
         "        height: 1024\n"
         "        prompts:\n"
-        f"          - \"{_sample_prompt(cfg)}\"\n"
+        f"          - {_yaml_str(_sample_prompt(cfg))}\n"
         f"        guidance_scale: {m.sample_guidance:g}\n"
         f"        sample_steps: {m.sample_steps}\n"
         "meta:\n"

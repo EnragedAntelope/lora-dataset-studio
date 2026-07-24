@@ -10,6 +10,7 @@ import yaml
 
 from studio.trainer_configs import (
     TRAINER_MODELS,
+    ModelPreset,
     TrainConfig,
     render_aitoolkit_yaml,
     render_musubi_toml,
@@ -56,6 +57,22 @@ def test_musubi_command_flags_model_paths(tmp_path: Path) -> None:
     _, command = write_configs(_cfg("musubi", tmp_path), install_path="/opt/musubi")
     assert "<<FILL:" in command  # honest about needing model paths
     assert "/opt/musubi" in command
+
+
+def test_aitoolkit_yaml_escapes_windows_path_and_quotes(tmp_path: Path) -> None:
+    """A user-supplied Windows checkpoint path (backslashes) or a name/prompt with
+    a double-quote must not break the emitted YAML — regression for the naive
+    double-quoted interpolation that produced an unparseable config."""
+    m = ModelPreset(key="sdxl-custom", label="x",
+                    name_or_path=r'C:\models\my "best" ckpt.safetensors',
+                    arch="sdxl", quantize=False, noise_scheduler="ddpm")
+    cfg = TrainConfig(trainer="ai-toolkit", model=m, dataset_dir=tmp_path,
+                      name='weird: name "v2"', trigger='trg, x')
+    doc = yaml.safe_load(render_aitoolkit_yaml(cfg))  # must not raise
+    proc = doc["config"]["process"][0]
+    assert proc["model"]["name_or_path"] == r'C:\models\my "best" ckpt.safetensors'
+    assert doc["config"]["name"] == 'weird: name "v2"'
+    assert "trg, x" in proc["sample"]["prompts"][0]
 
 
 def test_unknown_trainer_raises(tmp_path: Path) -> None:

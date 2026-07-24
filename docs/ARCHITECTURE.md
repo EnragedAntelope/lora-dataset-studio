@@ -1,6 +1,6 @@
 # Architecture
 
-Version: 0.10.0
+Version: 0.10.1
 
 ```
 app.py                  Gradio UI — thin wiring over the stage functions (5 tabs)
@@ -182,6 +182,11 @@ in ② is deliberately not built (Style never generates; Concept generation is a
   white, so this is backend-agnostic and needs no mask handle. It runs only when isolation is
   on and the toggle is set (default off → the Character path is byte-identical), before the
   resize. An effectively all-white image (nothing found) is returned unchanged.
+- **Preprocess output names must not clobber.** `list_images` admits several extensions, so
+  two sources sharing a stem (`cat.jpg` + `cat.png`, in one folder or across merged input
+  folders) both map to `cat_prepped.png`. `preprocess()` makes the output non-clobbering
+  (`_prepped`, `_prepped_2`, …) so the second source never silently overwrites the first —
+  same "never clobber" rule `package.py`/`zip_dataset` already follow.
 - **SAM3 scores a text prompt as ONE concept.** `"backpack, walkie talkie"` asks for a
   single object that is both, and found *less* than `"backpack"` alone (40,942 px vs
   42,712 px); segmenting each term and unioning found 60,084 px (1.47x). `split_terms()`
@@ -233,6 +238,19 @@ in ② is deliberately not built (Style never generates; Concept generation is a
   the `Version:` line at the top of this file, and (2) publish a Release
   (`gh release create vX.Y.Z --generate-notes`, or the GitHub API) targeting the commit
   that lands the bump. Skipping step 2 means users on the old version never see a notice.
+- **User strings in the ai-toolkit config go through PyYAML, never a raw quoted template.**
+  The generated `config.yaml` embeds a user-supplied `name`, `model.name_or_path` (which may be
+  a Windows checkpoint path like `C:\models\x.safetensors`), and the sample prompt (which carries
+  the trigger/name). Splicing those into a hand-written double-quoted YAML scalar breaks the file
+  — a backslash is an escape char there and a stray `"` closes the string early. `_yaml_str()`
+  emits each through `yaml.safe_dump` (whitespace collapsed to one line first) so quoting is
+  always correct. The `.toml` renderers are unaffected: they emit only `.as_posix()` paths and
+  numbers, no free text.
+- **`python-dotenv` is a declared direct dependency.** `studio/config.py` imports
+  `dotenv.load_dotenv` and `Settings` sets `env_file=.env`; both need `python-dotenv` at runtime.
+  It is **not** a hard dependency of `pydantic-settings>=2.2`, so it is listed explicitly in
+  `requirements.txt` — a fresh install without it fails at import of `studio.config`, which every
+  entry point pulls in.
 - **Gemini caption default is a rolling alias.** The Gemini captioner defaults to
   `gemini-flash-latest` so it doesn't 404 when a pinned version is decommissioned. The
   Caption tab can refresh and pick a specific model; `Captioner(model_override=...)`
